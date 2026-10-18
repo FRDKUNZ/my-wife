@@ -636,6 +636,7 @@ async function speakText(text) {
 
 function stopVoiceLine() {
   voiceLineRequestToken += 1;
+  window.desktopPet.reportVoiceLinePlayback?.(false);
   if (voiceLineAudio) {
     voiceLineAudio.pause();
     voiceLineAudio.src = "";
@@ -647,21 +648,35 @@ async function playVoiceLine(category = "all", prioritize = false, test = false)
   if (!settings.voiceLines?.enabled) return false;
   if (!prioritize && (chatRequestActive || conversationActive || bubbleVisible || speechActive || dragStart || state !== "idle" || voiceLineAudio || Date.now() - voiceLineLastInteraction < 30000)) return false;
   const token = ++voiceLineRequestToken;
+  window.desktopPet.reportVoiceLinePlayback?.(true);
   if (voiceLineAudio) { voiceLineAudio.pause(); voiceLineAudio.src = ""; voiceLineAudio = null; }
   const request = window.desktopPet.getRandomVoiceLine(category, test);
   if (prioritize) stopSpeech();
   let result;
-  try { result = await request; } catch { return false; }
+  try { result = await request; } catch {
+    if (token === voiceLineRequestToken) window.desktopPet.reportVoiceLinePlayback?.(false);
+    return false;
+  }
   if (token !== voiceLineRequestToken || !result?.ok) {
+    if (token === voiceLineRequestToken) window.desktopPet.reportVoiceLinePlayback?.(false);
     if (!prioritize) scheduleIdleVoiceLine(result?.error === "clips_unavailable" ? null : 5000);
     return false;
   }
   const audio = new Audio(`data:audio/mpeg;base64,${result.data}`);
   audio.volume = settings.voiceLines?.volume ?? 0.7;
   voiceLineAudio = audio;
-  audio.onended = () => { if (voiceLineAudio === audio) { audio.src = ""; voiceLineAudio = null; scheduleIdleVoiceLine(); } };
-  audio.onerror = () => { if (voiceLineAudio === audio) { audio.src = ""; voiceLineAudio = null; scheduleIdleVoiceLine(5000); } };
-  try { await audio.play(); return true; } catch { if (voiceLineAudio === audio) { audio.src = ""; voiceLineAudio = null; } if (!prioritize) scheduleIdleVoiceLine(5000); return false; }
+  window.desktopPet.reportVoiceLinePlayback?.(true);
+  const finishVoiceLine = (retryDelay = null) => {
+    if (voiceLineAudio !== audio) return;
+    audio.src = "";
+    voiceLineAudio = null;
+    window.desktopPet.reportVoiceLinePlayback?.(false);
+    if (retryDelay === null) scheduleIdleVoiceLine();
+    else scheduleIdleVoiceLine(retryDelay);
+  };
+  audio.onended = () => finishVoiceLine();
+  audio.onerror = () => finishVoiceLine(5000);
+  try { await audio.play(); return true; } catch { finishVoiceLine(5000); return false; }
 }
 
 function scheduleIdleVoiceLine(delayOverride = null) {

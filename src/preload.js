@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld("desktopPet", {
   setSettings: (patch) => ipcRenderer.send("set-settings", patch),
   getChatState: () => ipcRenderer.invoke("get-chat-state"),
   isChatActive: () => ipcRenderer.invoke("is-chat-active"),
+  pauseAutonomousConversation: (minutes) => ipcRenderer.invoke("pause-autonomous-conversation", minutes),
+  reportVoiceLinePlayback: (playing) => ipcRenderer.send("voice-line-playback", playing),
   saveChatConfig: (patch) => ipcRenderer.invoke("save-chat-config", patch),
   testAssistantConnection: (patch) => ipcRenderer.invoke("test-assistant-connection", patch),
   listAssistantModels: (patch) => ipcRenderer.invoke("list-assistant-models", patch),

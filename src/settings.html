@@ -182,6 +182,15 @@
         <label class="check-row"><input id="stream-replies" type="checkbox" checked /><span data-i18n="settings.stream">流式回复</span></label>
         <label class="check-row"><input id="send-temperature" type="checkbox" checked /><span data-i18n="settings.llm.sendTemperature">发送温度参数</span></label>
         <p class="hint" data-i18n="settings.llm.compatibility"></p>
+        <hr />
+        <h3>Autonomous conversation</h3>
+        <p class="hint">Rem can start a short chat when you are idle. Requires a configured chat model.</p>
+        <label class="check-row"><input id="autonomous-enabled" type="checkbox" /><span>Enable Autonomous Conversation</span></label>
+        <div class="split-row">
+          <label><span>Minimum interval (seconds)</span><input id="autonomous-min" type="number" min="120" max="3600" step="10" /></label>
+          <label><span>Maximum interval (seconds)</span><input id="autonomous-max" type="number" min="120" max="3600" step="10" /></label>
+        </div>
+        <div class="button-row"><button id="autonomous-pause" type="button">Pause for 30 minutes</button><span id="autonomous-pause-status" class="hint" role="status"></span></div>
       </section>
       </div>
       <div id="page-voice" role="tabpanel" aria-labelledby="tab-voice" data-page="voice" hidden>

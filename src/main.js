@@ -42,6 +42,7 @@ const DEFAULT_SETTINGS = {
   scale: 1,
   alwaysOnTop: true,
   restReminderMinutes: 0,
+  autonomousConversation: { enabled: false, minIntervalSeconds: 120, maxIntervalSeconds: 180 },
   voiceLines: { enabled: false, idleVoiceEnabled: false, idleIntervalMinSeconds: 30, idleIntervalMaxSeconds: 60, launchAtStartup: true, playGreetingOnStartup: false, startupGreetingClickFallback: false, clickCategories: ["Interactive Conversation", "Funny Reactions"], idleCategories: ["Daily Conversation", "Work & Study"], greetingCategory: "Greeting", nightCategory: "Night", nightEnabled: false, nightStart: "22:00", nightEnd: "05:00", volume: 0.7, sourceFolder: "", collections: {} },
   assistant: {
     baseUrl: "",
@@ -122,6 +123,14 @@ let chatRequest = null;
 let chatRevision = 0;
 const chatDrafts = new Map();
 let chatDraftVersion = 0;
+let autonomousTimer = null;
+let autonomousPauseUntil = 0;
+let autonomousLastSpokeAt = 0;
+let autonomousBusy = false;
+let autonomousRequestController = null;
+let voiceLinePlaying = false;
+let lastUserActivityAt = Date.now();
+const autonomousRecentOpeners = [];
 let characterSessions = {};
 let voiceError = false;
 let speechGeneration = 0;
@@ -512,6 +521,13 @@ function normalizeSettings(nextSettings) {
   const restReminderMinutes = [0, 30, 60].includes(Number(nextSettings.restReminderMinutes))
     ? Number(nextSettings.restReminderMinutes)
     : 0;
+  const rawAutonomous = { ...DEFAULT_SETTINGS.autonomousConversation, ...(nextSettings.autonomousConversation || {}) };
+  const autonomousConversation = {
+    enabled: rawAutonomous.enabled === true,
+    minIntervalSeconds: Math.round(clampNumber(rawAutonomous.minIntervalSeconds, 120, 3600, 120)),
+    maxIntervalSeconds: Math.round(clampNumber(rawAutonomous.maxIntervalSeconds, 120, 3600, 180)),
+  };
+  autonomousConversation.maxIntervalSeconds = Math.max(autonomousConversation.minIntervalSeconds, autonomousConversation.maxIntervalSeconds);
   const rawVoice = { ...DEFAULT_SETTINGS.voiceLines, ...(nextSettings.voiceLines || {}) };
   const voiceLines = {
     enabled: rawVoice.enabled === true,
@@ -543,6 +559,7 @@ function normalizeSettings(nextSettings) {
     scale,
     alwaysOnTop,
     restReminderMinutes,
+    autonomousConversation,
     voiceLines,
     assistant,
     tts,
@@ -967,6 +984,7 @@ function updateSettings(patch) {
   }
   syncWindowsStartup();
   scheduleRestReminder();
+  scheduleAutonomousConversation();
   if (mainWindow) {
     mainWindow.setAlwaysOnTop(settings.alwaysOnTop);
     applyWindowSize();
@@ -1296,6 +1314,7 @@ function publicChatConfig() {
   const { apiKey: ttsApiKey, ...tts } = settings.tts || DEFAULT_SETTINGS.tts;
   return {
     language: settings.language,
+    autonomousConversation: { ...settings.autonomousConversation },
     characterId: settings.characterId,
     resolvedLanguage: activeLanguage(),
     assistant: {
@@ -1461,6 +1480,7 @@ function setChatDraft(event, draft = {}) {
   if (!draft || typeof draft !== "object" || draft.characterId !== settings.characterId || draft.revision !== chatRevision
     || typeof draft.text !== "string") return;
   const text = draft.text.slice(0, 1200);
+  if (text) lastUserActivityAt = Date.now();
   if (text) chatDrafts.set(settings.characterId, text);
   else chatDrafts.delete(settings.characterId);
   chatDraftVersion += 1;
@@ -1750,6 +1770,8 @@ async function sendChatMessage(_event, rawText, context) {
     return { ok: false, cancelled: true, error: "stale_chat", ...chatState() };
   }
   const text = cleanUserMessage(rawText);
+  lastUserActivityAt = Date.now();
+  if (autonomousBusy) autonomousRequestController?.abort();
   if (!text) {
     return { ok: false, error: "empty_message", ...chatState() };
   }
@@ -1794,6 +1816,83 @@ async function sendChatMessage(_event, rawText, context) {
       broadcastChatState();
     }
   }
+}
+
+function autonomousCanSpeak() {
+  const chatFocused = [chatWindow, quickChatWindow, companionSettingsWindow]
+    .some((window) => window && !window.isDestroyed() && window.isFocused());
+  const hasDraft = [...chatDrafts.values()].some((value) => String(value || "").trim());
+  return settings.autonomousConversation?.enabled === true
+    && Boolean(settings.assistant?.baseUrl && settings.assistant?.model)
+    && mainWindow && !mainWindow.isDestroyed()
+    && !app.isQuitting && !chatRequest && !autonomousBusy && !speechSession && !voiceLinePlaying
+    && !chatFocused && !hasDraft && Date.now() >= autonomousPauseUntil
+    && Date.now() - lastUserActivityAt >= 90_000
+    && Date.now() - autonomousLastSpokeAt >= 90_000;
+}
+
+function scheduleAutonomousConversation(delayOverride = null) {
+  clearTimeout(autonomousTimer);
+  autonomousTimer = null;
+  if (!settings.autonomousConversation?.enabled || app.isQuitting) {
+    autonomousRequestController?.abort();
+    return;
+  }
+  const min = settings.autonomousConversation.minIntervalSeconds;
+  const max = settings.autonomousConversation.maxIntervalSeconds;
+  const delay = delayOverride ?? (min + Math.random() * (max - min)) * 1000;
+  autonomousTimer = setTimeout(runAutonomousConversation, delay);
+}
+
+async function runAutonomousConversation() {
+  autonomousTimer = null;
+  if (!settings.autonomousConversation?.enabled || app.isQuitting) return;
+  if (!autonomousCanSpeak()) {
+    scheduleAutonomousConversation(30_000);
+    return;
+  }
+  autonomousBusy = true;
+  autonomousRequestController = new AbortController();
+  broadcastChatState();
+  const recent = autonomousRecentOpeners.slice(-8).map((item) => `- ${item}`).join("\n") || "- belum ada";
+  const openerPrompt = [
+    "Mulai percakapan secara spontan dengan Ferdi sebagai Rem. Tulis satu ucapan singkat dalam bahasa Indonesia yang natural, hangat, dan bervariasi; boleh berupa cerita, komentar, candaan, sapaan, atau pertanyaan (jangan selalu bertanya).",
+    "Pakai konteks percakapan terakhir jika relevan. Jangan mengaku tahu aktivitas, layar, atau lokasi Ferdi tanpa konteks yang nyata. Hindari mengulang pembuka/topik berikut:",
+    recent,
+    "Keluarkan hanya ucapan Rem, maksimal dua kalimat. Jangan gunakan ekspresi marker.",
+  ].join("\n");
+  try {
+    const result = await requestAssistantReply(openerPrompt, autonomousRequestController);
+    autonomousBusy = false;
+    autonomousRequestController = null;
+    broadcastChatState();
+    if (!result.ok || !result.reply || !autonomousCanSpeak()) {
+      scheduleAutonomousConversation(5 * 60_000);
+      return;
+    }
+    addChatMessage("assistant", result.reply);
+    autonomousRecentOpeners.push(result.reply.slice(0, 180));
+    if (autonomousRecentOpeners.length > 8) autonomousRecentOpeners.shift();
+    autonomousLastSpokeAt = Date.now();
+    broadcastChatState();
+    sendPetMessage(result.reply, result.action || "idle", {
+      source: "chat", speak: true, bubbleText: bubblePreview(result.reply),
+    });
+  } catch {
+    scheduleAutonomousConversation(5 * 60_000);
+  } finally {
+    autonomousBusy = false;
+    autonomousRequestController = null;
+    broadcastChatState();
+    if (!autonomousTimer) scheduleAutonomousConversation();
+  }
+}
+
+function pauseAutonomousConversation(_event, minutes = 30) {
+  autonomousPauseUntil = Date.now() + Math.min(240, Math.max(1, Number(minutes) || 30)) * 60_000;
+  autonomousRequestController?.abort();
+  scheduleAutonomousConversation(autonomousPauseUntil - Date.now());
+  return { ok: true, pauseUntil: autonomousPauseUntil };
 }
 
 function broadcastChatState() {
@@ -2279,6 +2378,8 @@ app.whenReady().then(() => {
     (chatWindow && !chatWindow.isDestroyed() && chatWindow.isFocused())
     || (quickChatWindow && !quickChatWindow.isDestroyed() && quickChatWindow.isFocused())
   ));
+  ipcMain.handle("pause-autonomous-conversation", pauseAutonomousConversation);
+  ipcMain.on("voice-line-playback", (_event, playing) => { voiceLinePlaying = playing === true; });
   ipcMain.handle("save-chat-config", (_event, patch) => applyChatConfigPatch(patch));
   ipcMain.handle("test-assistant-connection", testAssistantConnection);
   ipcMain.handle("list-assistant-models", listAssistantModels);
@@ -2297,7 +2398,7 @@ app.whenReady().then(() => {
   ipcMain.handle("replay-speech", replaySpeech);
   ipcMain.handle("synthesize-speech", synthesizeSpeech);
   ipcMain.on("set-settings", (_event, patch) => updateSettings(patch));
-  ipcMain.on("record-interaction", (_event, kind) => updateMoodFromInteraction(kind));
+  ipcMain.on("record-interaction", (_event, kind) => { lastUserActivityAt = Date.now(); updateMoodFromInteraction(kind); });
   ipcMain.on("present-notification", (event, notice) => {
     if (event.sender !== mainWindow?.webContents || !Notification.isSupported()) return;
     const title = normalizeCompactText(notice?.title, 120);
@@ -2325,8 +2426,9 @@ app.whenReady().then(() => {
   }
 
   scheduleRestReminder();
+  scheduleAutonomousConversation();
   maybeShowInitialPersonaSettings();
 });
 
 app.on("window-all-closed", () => app.quit());
-app.on("before-quit", () => { speechSession?.controller?.abort(); });
+app.on("before-quit", () => { app.isQuitting = true; clearTimeout(autonomousTimer); autonomousTimer = null; speechSession?.controller?.abort(); });

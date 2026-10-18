@@ -85,6 +85,9 @@ const voiceLineVolumeEl = document.querySelector("#voice-line-volume");
 const idleVoiceEnabledEl = document.querySelector("#idle-voice-enabled");
 const idleIntervalMinEl = document.querySelector("#idle-interval-min");
 const idleIntervalMaxEl = document.querySelector("#idle-interval-max");
+const autonomousEnabledEl = document.querySelector("#autonomous-enabled");
+const autonomousMinEl = document.querySelector("#autonomous-min");
+const autonomousMaxEl = document.querySelector("#autonomous-max");
 const launchAtStartupEl = document.querySelector("#launch-at-startup");
 const greetingOnStartupEl = document.querySelector("#greeting-on-startup");
 const greetingClickFallbackEl = document.querySelector("#greeting-click-fallback");
@@ -545,6 +548,10 @@ function renderConfig(preserveDraft = false) {
   maxHistoryEl.value = String(assistant.maxHistory || 12);
   streamRepliesEl.checked = assistant.stream !== false;
   rememberHistoryEl.checked = config.rememberHistory === true;
+  const autonomous = config.autonomousConversation || {};
+  autonomousEnabledEl.checked = autonomous.enabled === true;
+  autonomousMinEl.value = String(autonomous.minIntervalSeconds ?? 120);
+  autonomousMaxEl.value = String(autonomous.maxIntervalSeconds ?? 180);
 
   ttsProviderEl.value = tts.enabled ? (tts.provider || "system") : "none";
   selectedVoiceName = tts.voiceName || "";
@@ -738,6 +745,8 @@ function readConfigForm(includeEmptyKey = false) {
   };
 
   return { language: languageEl.value, characterId: selectedCharacterId, assistant, tts, persona, affection, profile,
+    autonomousConversation: { enabled: autonomousEnabledEl.checked,
+      minIntervalSeconds: Number(autonomousMinEl.value || 120), maxIntervalSeconds: Number(autonomousMaxEl.value || 180) },
     memory: { enabled: memoryEnabledEl.checked, notes: memoryNotesFromForm() },
     interactionResponses: interactionResponsesEl.checked,
     rememberHistory: rememberHistoryEl.checked,
@@ -751,6 +760,14 @@ function readConfigForm(includeEmptyKey = false) {
       greetingCategory: voiceGreetingCategoryEl.value.trim() || "Greeting", nightCategory: voiceNightCategoryEl.value.trim() || "Night",
       nightEnabled: nightCategoryEnabledEl.checked, nightStart: nightStartEl.value || "22:00", nightEnd: nightEndEl.value || "05:00" } };
 }
+
+document.querySelector("#autonomous-pause").addEventListener("click", async () => {
+  const status = document.querySelector("#autonomous-pause-status");
+  try {
+    const result = await window.desktopPet.pauseAutonomousConversation(30);
+    status.textContent = result.ok ? "Paused for 30 minutes." : "Unable to pause.";
+  } catch { status.textContent = "Unable to pause."; }
+});
 
 async function saveConfig(includeEmptyKey = false) {
   if (saveSettingsButton.disabled) return;
