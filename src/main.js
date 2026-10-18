@@ -1989,6 +1989,10 @@ function scheduleAutonomousConversation(delayOverride = null) {
   autonomousTimer = setTimeout(runAutonomousConversation, delay);
 }
 
+function autonomousRetryDelay() {
+  return Math.max(120, Number(settings.autonomousConversation?.minIntervalSeconds) || 120) * 1000;
+}
+
 async function runAutonomousConversation() {
   autonomousTimer = null;
   if (!settings.autonomousConversation?.enabled || app.isQuitting) return;
@@ -2025,7 +2029,7 @@ async function runAutonomousConversation() {
     autonomousRequestController = null;
     broadcastChatState();
     if (!result.ok) {
-      scheduleAutonomousConversation(5 * 60_000);
+      scheduleAutonomousConversation(autonomousRetryDelay());
       return;
     }
     if (/^WAIT\s*$/i.test(result.reply || "")) {
@@ -2034,7 +2038,7 @@ async function runAutonomousConversation() {
     }
     const decision = /^SPEAK\s*:\s*([\s\S]+)$/i.exec(result.reply || "");
     if (!decision || !decision[1].trim()) {
-      scheduleAutonomousConversation(5 * 60_000);
+      scheduleAutonomousConversation(autonomousRetryDelay());
       return;
     }
     if (!autonomousCanSpeak()) {
@@ -2051,7 +2055,7 @@ async function runAutonomousConversation() {
       source: "chat", speak: true, bubbleText: bubblePreview(spokenText),
     });
   } catch {
-    scheduleAutonomousConversation(5 * 60_000);
+    scheduleAutonomousConversation(autonomousRetryDelay());
   } finally {
     autonomousBusy = false;
     autonomousRequestController = null;
