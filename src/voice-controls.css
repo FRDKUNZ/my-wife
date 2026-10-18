@@ -1,0 +1,26 @@
+.voice-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  color: #526368;
+  font: 12px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.voice-controls[hidden] { display: none !important; }
+.voice-controls span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voice-controls button {
+  flex-shrink: 0;
+  min-width: 74px;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid #b8cccf;
+  border-radius: 6px;
+  background: #f4faf9;
+  color: #245c61;
+  font: inherit;
+  cursor: pointer;
+}
+.voice-controls button:hover { background: #e2f0ee; }
+.voice-controls button:disabled { opacity: 0.6; cursor: default; }
+.voice-controls button:focus-visible { outline: 2px solid #316e74; outline-offset: 2px; }

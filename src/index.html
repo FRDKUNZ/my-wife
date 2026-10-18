@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Desktop Pet</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./voice-controls.css" />
+  </head>
+  <body>
+    <div id="speech-panel">
+      <button id="speech-bubble" type="button" aria-live="polite"></button>
+      <div id="voice-controls" class="voice-controls" hidden>
+        <span id="voice-status" role="status"></span>
+        <button id="voice-toggle" type="button"></button>
+      </div>
+    </div>
+    <canvas id="pet" width="768" height="832" aria-label="Desktop pet"></canvas>
+    <button id="talk" type="button">对话</button>
+    <script src="./i18n.js"></script>
+    <script src="./speech-text.js"></script>
+    <script src="./renderer.js"></script>
+    <script src="./voice-controls.js"></script>
+  </body>
+</html>

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Companion Chat</title>
+    <link rel="stylesheet" href="./chat.css" />
+    <link rel="stylesheet" href="./voice-controls.css" />
+  </head>
+  <body>
+    <main class="chat-shell">
+      <header class="chat-header">
+        <div>
+          <h1 id="chat-title">伴侣对话</h1>
+          <p id="chat-subtitle">当前角色：桌宠</p>
+        </div>
+        <nav class="chat-actions">
+          <button id="quick-mode" type="button"><img src="./icons/message-square.svg" width="18" height="18" alt="" /></button>
+          <button id="open-settings" type="button"><img src="./icons/settings-2.svg" width="18" height="18" alt="" /></button>
+        </nav>
+      </header>
+
+      <div class="conversation">
+        <section id="messages" class="messages" aria-live="polite"></section>
+        <div class="conversation-footer" hidden>
+          <button id="latest-message" type="button"><img src="./icons/arrow-down.svg" width="14" height="14" alt="" /><span id="latest-label">最新回复</span></button>
+        </div>
+      </div>
+      <div id="voice-controls" class="voice-controls" hidden>
+        <span id="voice-status" role="status"></span>
+        <button id="voice-toggle" type="button"></button>
+      </div>
+
+      <form id="composer" class="composer">
+        <textarea id="message-input" rows="2" maxlength="1200" placeholder="和她说点什么..." autofocus></textarea>
+        <button id="send-message" type="submit">发送</button>
+        <button id="stop-message" type="button" hidden>停止</button>
+      </form>
+
+      <footer class="chat-footer">
+        <span id="status" role="status">未配置时会提示打开设置。</span>
+        <button id="retry-message" type="button" hidden>重试</button>
+        <button id="clear-history" type="button">清空</button>
+      </footer>
+    </main>
+    <script src="./i18n.js"></script>
+    <script src="./chat-draft.js"></script>
+    <script src="./chat.js"></script>
+    <script src="./voice-controls.js"></script>
+  </body>
+</html>

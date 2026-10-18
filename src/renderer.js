@@ -1,0 +1,829 @@
+const canvas = document.querySelector("#pet");
+const speechBubble = document.querySelector("#speech-bubble");
+const talkButton = document.querySelector("#talk");
+const ctx = canvas.getContext("2d", { alpha: true });
+const i18n = window.DesktopPetI18n;
+const SINGLE_CLICK_DELAY = 280;
+const CLICK_ONLY_COOLDOWN = 220;
+
+const FALLBACK_CHARACTER = {
+  id: "default",
+  name: "Default Character",
+  spritePath: "../assets/characters/default/sprite.png",
+  frame: { width: 768, height: 832 },
+  states: {
+    idle: { row: 0, frames: 6, interval: 900 },
+    runningRight: { row: 1, frames: 8, interval: 100 },
+    runningLeft: { row: 2, frames: 8, interval: 100 },
+    waving: { row: 3, frames: 4, interval: 160 },
+    jumping: { row: 4, frames: 5, interval: 140 },
+    failed: { row: 5, frames: 8, interval: 220 },
+    running: { row: 6, frames: 6, interval: 100 },
+    review: { row: 7, frames: 6, interval: 500 },
+  },
+  automaticActions: ["review", "review", "waving", "jumping"],
+  clickActions: ["waving", "review", "jumping", "failed"],
+  staticExpressions: [
+    { state: "idle", frame: 0 },
+    { state: "idle", frame: 1 },
+    { state: "idle", frame: 2 },
+    { state: "idle", frame: 3 },
+    { state: "idle", frame: 5 },
+    { state: "waving", frame: 2 },
+    { state: "review", frame: 1 },
+    { state: "review", frame: 4 },
+    { state: "failed", frame: 1 },
+    { state: "failed", frame: 4 },
+  ],
+};
+
+let settings = {
+  language: "system",
+  resolvedLanguage: "zh-CN",
+  expressionMode: "automatic",
+  interactionResponses: true,
+  userName: "",
+  scale: 1,
+  alwaysOnTop: true,
+  tts: { enabled: false, provider: "none", voiceName: "", rate: 1, pitch: 1, volume: 1 },
+};
+let character = FALLBACK_CHARACTER;
+let spriteImage;
+let state = "idle";
+let frameIndex = 0;
+let animationTimer;
+let idleTimer;
+let temporaryToken = 0;
+let clickExpressionIndex = 0;
+let dragInterval;
+let dragStart = null;
+let didDrag = false;
+let clickTimer;
+let clickOnlyReadyAt = 0;
+let ignoreSingleClicksUntil = 0;
+let hoverReadyAt = 0;
+let bubbleTimer;
+let didShowStartupGreeting = false;
+let didPlayStartupVoiceGreeting = false;
+let activeLanguage = "zh-CN";
+let spriteLoadToken = 0;
+let speechToken = 0;
+let speechGeneration = 0;
+let speechId = null;
+let activeAudio = null;
+let speechActive = false;
+let speechWatchdog;
+let conversationActive = false;
+let voiceLineAudio = null;
+let voiceLineIdleTimer = null;
+let voiceLineLastInteraction = 0;
+let voiceLineRequestToken = 0;
+let chatRequestActive = false;
+let conversationAction = "idle";
+let queuedNotice = null;
+let bubbleVisible = false;
+let interactionReadyAt = 0;
+let interactionVariants = { head: 0, greet: 0, drop: 0 };
+
+function text(key, variables = {}) {
+  return i18n.t(key, variables, activeLanguage);
+}
+
+function draw() {
+  if (!spriteImage) return;
+  const current = character.states[state] || character.states.idle;
+  const frame = character.frame;
+  const sx = (frameIndex % current.frames) * frame.width;
+  const sy = current.row * frame.height;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(spriteImage, sx, sy, frame.width, frame.height, 0, 0, canvas.width, canvas.height);
+}
+
+function applyPetLayout() {
+  const petWidth = Math.round(192 * settings.scale);
+  const petHeight = Math.round(208 * settings.scale);
+  document.documentElement.style.setProperty("--pet-width", `${petWidth}px`);
+  document.documentElement.style.setProperty("--pet-height", `${petHeight}px`);
+}
+
+function startAnimation() {
+  window.clearInterval(animationTimer);
+  const current = character.states[state] || character.states.idle;
+  animationTimer = window.setInterval(() => {
+    if (settings.expressionMode === "clickOnly" && !dragStart) {
+      draw();
+      return;
+    }
+    // Play a conversational gesture once, then hold its expression while speaking.
+    frameIndex = conversationActive && state === conversationAction
+      ? Math.min(frameIndex + 1, current.frames - 1)
+      : (frameIndex + 1) % current.frames;
+    draw();
+  }, current.interval);
+  draw();
+}
+
+function setState(nextState) {
+  if (!character.states[nextState]) return;
+  if (state === nextState) return;
+  state = nextState;
+  frameIndex = 0;
+  startAnimation();
+}
+
+function scheduleIdleBehavior() {
+  window.clearTimeout(idleTimer);
+  if (settings.expressionMode !== "automatic" || conversationActive) return;
+
+  const delay = 22000 + Math.random() * 15000;
+  idleTimer = window.setTimeout(() => {
+    if (state === "idle" && !conversationActive) {
+      const choices = character.automaticActions.length > 0
+        ? character.automaticActions
+        : FALLBACK_CHARACTER.automaticActions;
+      playTemporary(choices[Math.floor(Math.random() * choices.length)], 1200);
+    }
+    scheduleIdleBehavior();
+  }, delay);
+}
+
+function temporaryDuration(nextState) {
+  if (nextState === "waving") return 1000;
+  if (nextState === "failed") return 1700;
+  if (nextState === "review") return 1400;
+  return 1100;
+}
+
+function playTemporary(nextState, duration = temporaryDuration(nextState)) {
+  if (!character.states[nextState]) return;
+  window.clearTimeout(idleTimer);
+  temporaryToken += 1;
+  const token = temporaryToken;
+  setState(nextState);
+  window.setTimeout(() => {
+    if (temporaryToken !== token || didDrag) return;
+    setState(conversationActive ? conversationAction : "idle");
+    scheduleIdleBehavior();
+  }, duration);
+}
+
+function nextClickState() {
+  const states = character.clickActions.length > 0 ? character.clickActions : FALLBACK_CHARACTER.clickActions;
+  const nextState = states[clickExpressionIndex % states.length];
+  clickExpressionIndex += 1;
+  return nextState;
+}
+
+function nextStaticExpression() {
+  const expressions = character.staticExpressions.length > 0
+    ? character.staticExpressions
+    : FALLBACK_CHARACTER.staticExpressions;
+  const expression = expressions[clickExpressionIndex % expressions.length];
+  clickExpressionIndex += 1;
+  return [expression.state, expression.frame];
+}
+
+function setStaticExpression(nextState, nextFrame) {
+  if (!character.states[nextState]) return;
+  window.clearTimeout(idleTimer);
+  temporaryToken += 1;
+  state = nextState;
+  frameIndex = Math.min(Math.max(0, nextFrame), character.states[nextState].frames - 1);
+  startAnimation();
+  draw();
+}
+
+function normalizeCharacter(nextCharacter) {
+  const merged = { ...FALLBACK_CHARACTER, ...(nextCharacter || {}) };
+  merged.frame = { ...FALLBACK_CHARACTER.frame, ...(nextCharacter?.frame || {}) };
+  merged.states = nextCharacter?.states || FALLBACK_CHARACTER.states;
+  merged.automaticActions = Array.isArray(nextCharacter?.automaticActions)
+    ? nextCharacter.automaticActions
+    : FALLBACK_CHARACTER.automaticActions;
+  merged.clickActions = Array.isArray(nextCharacter?.clickActions)
+    ? nextCharacter.clickActions
+    : FALLBACK_CHARACTER.clickActions;
+  merged.staticExpressions = Array.isArray(nextCharacter?.staticExpressions)
+    ? nextCharacter.staticExpressions
+    : FALLBACK_CHARACTER.staticExpressions;
+  return merged;
+}
+
+function applyAppState(nextAppState = {}) {
+  if (Number.isFinite(nextAppState.speechGeneration)) speechGeneration = Math.max(speechGeneration, nextAppState.speechGeneration);
+  const nextCharacter = normalizeCharacter(nextAppState.activeCharacter);
+  const characterChanged = nextCharacter.id !== character.id;
+  const modeChanged = nextAppState.settings?.expressionMode !== settings.expressionMode;
+  const voiceLinesWereEnabled = settings.voiceLines?.enabled === true;
+  const previousTts = JSON.stringify(settings.tts);
+  character = nextCharacter;
+  settings = {
+    language: nextAppState.settings?.language || nextAppState.language || "system",
+    resolvedLanguage: nextAppState.resolvedLanguage || nextAppState.settings?.resolvedLanguage || "zh-CN",
+    characterId: nextAppState.settings?.characterId || character.id,
+    expressionMode: nextAppState.settings?.expressionMode === "clickOnly" ? "clickOnly" : "automatic",
+    interactionResponses: nextAppState.settings?.interactionResponses !== false,
+    userName: nextAppState.settings?.persona?.userName || "",
+    scale: Number(nextAppState.settings?.scale) || 1,
+    alwaysOnTop: nextAppState.settings?.alwaysOnTop !== false,
+    voiceLines: {
+      enabled: nextAppState.settings?.voiceLines?.enabled === true,
+      volume: Math.min(Math.max(Number(nextAppState.settings?.voiceLines?.volume ?? 0.7), 0), 1),
+      idleVoiceEnabled: nextAppState.settings?.voiceLines?.idleVoiceEnabled === true,
+      idleIntervalMinSeconds: Math.min(Math.max(Number(nextAppState.settings?.voiceLines?.idleIntervalMinSeconds) || 30, 30), 60),
+      idleIntervalMaxSeconds: Math.min(Math.max(Number(nextAppState.settings?.voiceLines?.idleIntervalMaxSeconds) || 60, 30), 60),
+      playGreetingOnStartup: nextAppState.settings?.voiceLines?.playGreetingOnStartup === true,
+      startupGreetingClickFallback: nextAppState.settings?.voiceLines?.startupGreetingClickFallback === true,
+      clickCategories: Array.isArray(nextAppState.settings?.voiceLines?.clickCategories) ? nextAppState.settings.voiceLines.clickCategories : [nextAppState.settings?.voiceLines?.clickCategory || "Interactive Conversation", "Funny Reactions"],
+      idleCategories: Array.isArray(nextAppState.settings?.voiceLines?.idleCategories) ? nextAppState.settings.voiceLines.idleCategories : [nextAppState.settings?.voiceLines?.idleCategory || "Daily Conversation", "Work & Study"],
+      greetingCategory: nextAppState.settings?.voiceLines?.greetingCategory || "Greeting",
+      nightCategory: nextAppState.settings?.voiceLines?.nightCategory || "Night",
+      nightEnabled: nextAppState.settings?.voiceLines?.nightEnabled === true,
+      nightStart: nextAppState.settings?.voiceLines?.nightStart || "22:00",
+      nightEnd: nextAppState.settings?.voiceLines?.nightEnd || "05:00",
+    },
+    tts: {
+      enabled: nextAppState.settings?.tts?.enabled === true,
+      provider: typeof nextAppState.settings?.tts?.provider === "string"
+        ? nextAppState.settings.tts.provider
+        : "none",
+      voiceName: typeof nextAppState.settings?.tts?.voiceName === "string"
+        ? nextAppState.settings.tts.voiceName
+        : "",
+      rate: Number(nextAppState.settings?.tts?.rate) || 1,
+      pitch: Number(nextAppState.settings?.tts?.pitch) || 1,
+      volume: Math.min(Math.max(Number(nextAppState.settings?.tts?.volume ?? 1), 0), 1),
+    },
+  };
+  if (voiceLinesWereEnabled && !settings.voiceLines.enabled) stopVoiceLine();
+  if (characterChanged) {
+    interactionReadyAt = 0;
+    interactionVariants = { head: 0, greet: 0, drop: 0 };
+    clearPresentation();
+  }
+  else if (previousTts !== JSON.stringify(settings.tts)) {
+    stopSpeech();
+    if (bubbleVisible) hideBubbleLater(Math.max(3000, bubbleRemaining));
+  }
+  activeLanguage = settings.resolvedLanguage;
+  scheduleIdleVoiceLine();
+  talkButton.textContent = text("pet.talk");
+  talkButton.title = text("quick.toCharacter", { name: character.name });
+  document.documentElement.lang = activeLanguage;
+  applyPetLayout();
+
+  if (characterChanged || !spriteImage) {
+    const token = ++spriteLoadToken;
+    temporaryToken += 1;
+    window.clearInterval(animationTimer);
+    window.clearTimeout(idleTimer);
+    spriteImage = null;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    loadSprite(character.spritePath)
+      .then((image) => {
+        if (token !== spriteLoadToken) return;
+        spriteImage = image;
+        resetAfterSettingsChange();
+      })
+      .catch((error) => {
+        if (token === spriteLoadToken) console.error("Unable to load character sprite", error);
+      });
+    return;
+  }
+
+  if (modeChanged) resetAfterSettingsChange();
+}
+
+function resetAfterSettingsChange() {
+  window.clearTimeout(clickTimer);
+  ignoreSingleClicksUntil = 0;
+  clickOnlyReadyAt = 0;
+  cancelDrag();
+  temporaryToken += 1;
+  state = "idle";
+  frameIndex = 0;
+  if (settings.expressionMode === "clickOnly") {
+    window.clearTimeout(idleTimer);
+    const currentIndex = character.staticExpressions.findIndex((expression) => expression.state === "idle" && expression.frame === 0);
+    clickExpressionIndex = currentIndex >= 0 ? currentIndex + 1 : 0;
+    setStaticExpression("idle", 0);
+  } else {
+    startAnimation();
+    if (conversationActive && !dragStart) setState(conversationAction);
+    scheduleIdleBehavior();
+  }
+  scheduleStartupGreeting();
+  if (!didPlayStartupVoiceGreeting && settings.voiceLines?.playGreetingOnStartup) {
+    didPlayStartupVoiceGreeting = true;
+    let attempts = 0;
+    const tryStartupVoiceGreeting = async () => {
+      if (!settings.voiceLines?.playGreetingOnStartup || attempts >= 3) return;
+      attempts += 1;
+      if (voiceLineAudio) { window.setTimeout(tryStartupVoiceGreeting, 1000); return; }
+      const greetingCategory = allowedVoiceCategories([settings.voiceLines.greetingCategory]);
+      const played = await playVoiceLine(greetingCategory, false);
+      if (!played && attempts < 3) {
+        const hasGreeting = greetingCategory.length ? await window.desktopPet.getRandomVoiceLine(greetingCategory).catch(() => null) : null;
+        if (!hasGreeting?.ok && settings.voiceLines?.startupGreetingClickFallback) {
+          const fallbackPlayed = await playVoiceLine(settings.voiceLines.clickCategories, false);
+          if (fallbackPlayed) return;
+        }
+        window.setTimeout(tryStartupVoiceGreeting, 1000);
+      }
+    };
+    window.setTimeout(tryStartupVoiceGreeting, 700);
+  }
+}
+
+function respondToInteraction(kind) {
+  if (settings.expressionMode !== "automatic" || !settings.interactionResponses
+    || conversationActive || speechActive) return;
+  const choices = kind === "head" ? ["shy", "happy", "review", "idle"]
+    : kind === "drop" ? ["tsundereProud", "happy", "waving", "idle"] : ["waving", "happy", "idle"];
+  const action = choices.find((name) => character.states[name]);
+  if (action) playTemporary(action, 1400);
+  // Touches stay local and quiet; they neither replace a visible reply nor queue up.
+  if (bubbleVisible || performance.now() < interactionReadyAt) return;
+  interactionReadyAt = performance.now() + 6000;
+  const style = character.id === "luna" ? "luna" : "default";
+  const variant = interactionVariants[kind]++ % 2;
+  const line = text(`pet.interaction.${style}.${kind}.${variant}`);
+  showBubble(settings.userName ? text("pet.interaction.address", { name: settings.userName, line }) : line);
+}
+
+function handleClick(kind = "greet") {
+  window.desktopPet.recordInteraction("click");
+  voiceLineLastInteraction = Date.now();
+  if (voiceLineAudio) stopVoiceLine();
+  playVoiceLine(allowedVoiceCategories(settings.voiceLines?.clickCategories), true);
+  if (settings.expressionMode === "clickOnly") {
+    const [nextState, nextFrame] = nextStaticExpression();
+    setStaticExpression(nextState, nextFrame);
+  } else {
+    if (conversationActive || speechActive) return;
+    if (settings.interactionResponses) { respondToInteraction(kind); return; }
+    const nextState = nextClickState();
+    playTemporary(nextState);
+  }
+}
+
+function handleDoubleClick() {
+  voiceLineLastInteraction = Date.now();
+  playVoiceLine(allowedVoiceCategories(settings.voiceLines?.clickCategories), true);
+  window.clearTimeout(clickTimer);
+  if (settings.expressionMode === "clickOnly" || conversationActive || speechActive) return;
+  ignoreSingleClicksUntil = performance.now() + 360;
+  window.desktopPet.recordInteraction("doubleClick");
+  playTemporary("jumping", 1200);
+}
+
+function handleLongPress() {
+  window.clearTimeout(clickTimer);
+  if (settings.expressionMode === "clickOnly" || conversationActive || speechActive) return;
+  window.desktopPet.recordInteraction("longPress");
+  if (settings.interactionResponses) {
+    respondToInteraction("head");
+  } else {
+    playTemporary("review", 1400);
+  }
+}
+
+function scheduleSingleClick(kind) {
+  window.clearTimeout(clickTimer);
+  const scheduledAt = performance.now();
+  clickTimer = window.setTimeout(() => {
+    if (scheduledAt < ignoreSingleClicksUntil) return;
+    handleClick(kind);
+  }, SINGLE_CLICK_DELAY);
+}
+
+function handleClickOnlyPointerClick() {
+  const now = performance.now();
+  if (now < clickOnlyReadyAt) return;
+  clickOnlyReadyAt = now + CLICK_ONLY_COOLDOWN;
+  handleClick();
+}
+
+function beginDrag(event) {
+  voiceLineLastInteraction = Date.now();
+  if (event.button !== 0) return;
+  window.clearTimeout(clickTimer);
+  const bounds = canvas.getBoundingClientRect();
+  dragStart = {
+    x: event.screenX,
+    y: event.screenY,
+    time: performance.now(),
+    kind: (event.clientY - bounds.top) / bounds.height < 0.46 ? "head" : "greet",
+    expression: { state, frame: frameIndex },
+  };
+  didDrag = false;
+  canvas.classList.add("dragging");
+  window.desktopPet.dragStart();
+  window.clearInterval(dragInterval);
+  dragInterval = window.setInterval(async () => {
+    if (!dragStart) return;
+    const activeDrag = dragStart;
+    let movement;
+    try {
+      movement = await window.desktopPet.dragMove();
+    } catch {
+      return;
+    }
+    if (dragStart !== activeDrag) return;
+    if (Math.abs(movement.dx) > 2 || Math.abs(movement.dy) > 2) {
+      didDrag = true;
+      if (Math.abs(movement.dx) > 4) {
+        setState(movement.dx > 0 ? "runningRight" : "runningLeft");
+      } else {
+        setState("running");
+      }
+    }
+  }, 16);
+}
+
+function endDrag(event) {
+  if (!dragStart) return;
+  window.clearInterval(dragInterval);
+  window.desktopPet.dragEnd();
+  canvas.classList.remove("dragging");
+
+  const heldDuration = performance.now() - dragStart.time;
+  const { kind, expression } = dragStart;
+  dragStart = null;
+
+  if (didDrag) {
+    didDrag = false;
+    if (settings.expressionMode === "clickOnly") {
+      setStaticExpression(expression?.state || "idle", expression?.frame || 0);
+    } else {
+      setState(conversationActive ? conversationAction : "idle");
+      scheduleIdleBehavior();
+      respondToInteraction("drop");
+    }
+    return;
+  }
+
+  if (heldDuration > 450) {
+    if (settings.expressionMode !== "clickOnly") handleLongPress();
+    return;
+  }
+  if (settings.expressionMode === "clickOnly") {
+    if (event.detail > 1) return;
+    handleClickOnlyPointerClick();
+    return;
+  }
+  if (event.detail > 1) return;
+  scheduleSingleClick(kind);
+}
+
+let bubbleDeadline = 0;
+let bubbleRemaining = 0;
+let bubblePaused = false;
+let bubbleStreaming = false;
+
+function dismissBubble() {
+  window.clearTimeout(bubbleTimer);
+  speechBubble.classList.remove("visible");
+  bubbleVisible = false;
+  conversationActive = false;
+  conversationAction = "idle";
+  temporaryToken += 1;
+  if (settings.expressionMode === "automatic" && !dragStart) setState("idle");
+  scheduleIdleBehavior();
+  const pending = queuedNotice;
+  queuedNotice = null;
+  if (pending && pending.expiresAt > Date.now()) handlePetMessage(pending.message);
+}
+
+function clearPresentation() {
+  queuedNotice = null;
+  bubbleStreaming = false;
+  bubblePaused = false;
+  stopSpeech();
+  dismissBubble();
+}
+
+function hideBubbleLater(duration) {
+  window.clearTimeout(bubbleTimer);
+  bubbleRemaining = duration;
+  bubbleDeadline = Date.now() + duration;
+  if (!bubblePaused && !bubbleStreaming && !speechActive) bubbleTimer = window.setTimeout(dismissBubble, duration);
+}
+
+function showBubble(text, duration = Math.min(22000, Math.max(4500, String(text || "").length * 110))) {
+  if (!speechBubble || !text) return;
+  window.clearTimeout(bubbleTimer);
+  const continuing = speechBubble.textContent && String(text).startsWith(speechBubble.textContent);
+  const follow = continuing && speechBubble.scrollHeight - speechBubble.scrollTop - speechBubble.clientHeight < 24;
+  speechBubble.textContent = text;
+  if (follow) speechBubble.scrollTop = speechBubble.scrollHeight;
+  else if (!continuing) speechBubble.scrollTop = 0;
+  speechBubble.classList.add("visible");
+  bubbleVisible = true;
+  speechBubble.title = window.DesktopPetI18n.t("pet.openChat", {}, activeLanguage);
+  hideBubbleLater(duration);
+}
+
+speechBubble.addEventListener("mouseenter", () => {
+  bubblePaused = true;
+  bubbleRemaining = Math.max(1500, bubbleDeadline - Date.now());
+  window.clearTimeout(bubbleTimer);
+});
+speechBubble.addEventListener("mouseleave", () => { bubblePaused = false; hideBubbleLater(bubbleRemaining); });
+speechBubble.addEventListener("focus", () => { bubblePaused = true; window.clearTimeout(bubbleTimer); });
+speechBubble.addEventListener("blur", () => { bubblePaused = false; hideBubbleLater(Math.max(3000, bubbleRemaining)); });
+speechBubble.addEventListener("click", () => window.desktopPet.openChatWindow());
+talkButton.addEventListener("click", () => { voiceLineLastInteraction = Date.now(); if (voiceLineAudio) stopVoiceLine(); scheduleIdleVoiceLine(); window.desktopPet.openQuickChatWindow(); });
+
+function finishSpeech(token, failed = false) {
+  if (token !== speechToken) return;
+  stopSpeech(failed ? "error" : "idle");
+  if (bubbleVisible) hideBubbleLater(Math.max(3000, bubbleRemaining));
+}
+
+function chooseTtsVoice() {
+  if (!("speechSynthesis" in window)) return null;
+  const voices = window.speechSynthesis.getVoices();
+  if (!voices.length) return null;
+  if (settings.tts.voiceName) {
+    const exact = voices.find((voice) => voice.name === settings.tts.voiceName);
+    if (exact) return exact;
+  }
+  const languagePrefix = activeLanguage.split("-")[0];
+  return voices.find((voice) => voice.lang && voice.lang.toLowerCase().startsWith(languagePrefix))
+    || voices.find((voice) => /^zh/i.test(voice.lang))
+    || voices.find((voice) => /^ja|^en/i.test(voice.lang))
+    || voices[0];
+}
+
+function stopSpeech(status = "idle") {
+  speechToken += 1;
+  speechActive = false;
+  if (speechId !== null) window.desktopPet.speechStateChanged({ id: speechId, status });
+  speechId = null;
+  window.clearTimeout(speechWatchdog);
+  if (activeAudio) {
+    activeAudio.onended = null;
+    activeAudio.onerror = null;
+    activeAudio.pause();
+    activeAudio.src = "";
+    activeAudio = null;
+  }
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+  scheduleIdleVoiceLine();
+}
+
+async function speakText(text) {
+  stopVoiceLine();
+  stopSpeech();
+  const token = speechToken;
+  if (!settings.tts?.enabled || settings.tts.provider === "none" || !String(text || "").trim()) return;
+  speechActive = true;
+  window.clearTimeout(bubbleTimer);
+  try {
+    const id = await window.desktopPet.beginSpeech(speechGeneration);
+    if (token !== speechToken) {
+      if (id !== null) window.desktopPet.speechStateChanged({ id, status: "idle" });
+      return;
+    }
+    if (id === null) { finishSpeech(token); return; }
+    speechId = id;
+    const external = settings.tts.provider !== "system";
+    const chunks = window.DesktopPetSpeechText.splitSpeechText(text, external ? (settings.tts.provider === "fish" ? 3000 : 800) : 400);
+    let index = 0;
+    const playNext = async () => {
+      if (token !== speechToken) return;
+      if (index === chunks.length) { finishSpeech(token); return; }
+      const chunk = chunks[index++];
+      window.clearTimeout(speechWatchdog);
+      speechWatchdog = window.setTimeout(() => finishSpeech(token, true), 300000);
+      window.desktopPet.speechStateChanged({ id, status: "preparing" });
+      try {
+        if (external) {
+          const result = await window.desktopPet.synthesizeSpeech({ id, text: chunk });
+          if (token !== speechToken) return;
+          if (!result?.ok || !result.audioDataUrl) { finishSpeech(token, !result?.cancelled); return; }
+          activeAudio = new Audio(result.audioDataUrl);
+          activeAudio.volume = settings.tts.volume;
+          activeAudio.onended = playNext;
+          activeAudio.onerror = () => finishSpeech(token, true);
+          await activeAudio.play();
+          if (token === speechToken) window.desktopPet.speechStateChanged({ id, status: "playing" });
+        } else {
+          if (!("speechSynthesis" in window)) { finishSpeech(token, true); return; }
+          const utterance = new SpeechSynthesisUtterance(chunk);
+          const voice = chooseTtsVoice();
+          if (voice) utterance.voice = voice;
+          utterance.rate = Math.min(Math.max(Number(settings.tts.rate) || 1, 0.5), 1.8);
+          utterance.pitch = Math.min(Math.max(Number(settings.tts.pitch) || 1, 0.5), 1.8);
+          utterance.volume = settings.tts.volume;
+          utterance.onstart = () => {
+            if (token === speechToken) window.desktopPet.speechStateChanged({ id, status: "playing" });
+          };
+          utterance.onend = playNext;
+          utterance.onerror = () => finishSpeech(token, true);
+          window.speechSynthesis.speak(utterance);
+        }
+      } catch { finishSpeech(token, true); }
+    };
+    await playNext();
+  } catch {
+    finishSpeech(token, true);
+  }
+}
+
+function stopVoiceLine() {
+  voiceLineRequestToken += 1;
+  if (voiceLineAudio) {
+    voiceLineAudio.pause();
+    voiceLineAudio.src = "";
+    voiceLineAudio = null;
+  }
+}
+
+async function playVoiceLine(category = "all", prioritize = false, test = false) {
+  if (!settings.voiceLines?.enabled) return false;
+  if (!prioritize && (chatRequestActive || conversationActive || bubbleVisible || speechActive || dragStart || state !== "idle" || voiceLineAudio || Date.now() - voiceLineLastInteraction < 30000)) return false;
+  const token = ++voiceLineRequestToken;
+  if (voiceLineAudio) { voiceLineAudio.pause(); voiceLineAudio.src = ""; voiceLineAudio = null; }
+  const request = window.desktopPet.getRandomVoiceLine(category, test);
+  if (prioritize) stopSpeech();
+  let result;
+  try { result = await request; } catch { return false; }
+  if (token !== voiceLineRequestToken || !result?.ok) {
+    if (!prioritize) scheduleIdleVoiceLine(result?.error === "clips_unavailable" ? null : 5000);
+    return false;
+  }
+  const audio = new Audio(`data:audio/mpeg;base64,${result.data}`);
+  audio.volume = settings.voiceLines?.volume ?? 0.7;
+  voiceLineAudio = audio;
+  audio.onended = () => { if (voiceLineAudio === audio) { audio.src = ""; voiceLineAudio = null; scheduleIdleVoiceLine(); } };
+  audio.onerror = () => { if (voiceLineAudio === audio) { audio.src = ""; voiceLineAudio = null; scheduleIdleVoiceLine(5000); } };
+  try { await audio.play(); return true; } catch { if (voiceLineAudio === audio) { audio.src = ""; voiceLineAudio = null; } if (!prioritize) scheduleIdleVoiceLine(5000); return false; }
+}
+
+function scheduleIdleVoiceLine(delayOverride = null) {
+  window.clearTimeout(voiceLineIdleTimer);
+  voiceLineIdleTimer = null;
+  if (!settings.voiceLines?.enabled || !settings.voiceLines?.idleVoiceEnabled) return;
+  const min = Math.min(settings.voiceLines.idleIntervalMinSeconds, settings.voiceLines.idleIntervalMaxSeconds);
+  const max = Math.max(settings.voiceLines.idleIntervalMinSeconds, settings.voiceLines.idleIntervalMaxSeconds);
+  const interval = delayOverride ?? (min + Math.random() * (max - min)) * 1000;
+  voiceLineIdleTimer = window.setTimeout(async () => {
+    voiceLineIdleTimer = null;
+    const recentlyActive = Date.now() - voiceLineLastInteraction < 30000;
+    let chatFocused = false;
+    try { chatFocused = await window.desktopPet.isChatActive(); } catch { /* Chat focus is an optional activity signal. */ }
+    if (recentlyActive || chatFocused || chatRequestActive || conversationActive || bubbleVisible || speechActive || dragStart || state !== "idle" || voiceLineAudio) {
+      scheduleIdleVoiceLine(5000);
+      return;
+    }
+    const categories = [...settings.voiceLines.idleCategories];
+    if (settings.voiceLines.nightEnabled && isNightCategoryActive(new Date(), settings.voiceLines.nightStart, settings.voiceLines.nightEnd)) categories.push(settings.voiceLines.nightCategory);
+    playVoiceLine(allowedVoiceCategories(categories), false);
+  }, interval);
+}
+
+function allowedVoiceCategories(categories = []) {
+  const selected = Array.isArray(categories) ? categories : [categories];
+  const nightAllowed = settings.voiceLines?.nightEnabled
+    && isNightCategoryActive(new Date(), settings.voiceLines.nightStart, settings.voiceLines.nightEnd);
+  return selected.filter((category) => category !== settings.voiceLines?.nightCategory || nightAllowed);
+}
+
+function isNightCategoryActive(date, start, end) {
+  const minute = (value) => {
+    const match = /^(\d{2}):(\d{2})$/.exec(value);
+    return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+  };
+  const from = minute(start); const to = minute(end);
+  if (from === null || to === null || from === to) return false;
+  const current = date.getHours() * 60 + date.getMinutes();
+  return from < to ? current >= from && current < to : current >= from || current < to;
+}
+
+window.desktopPet.onSpeechStopped((generation) => {
+  speechGeneration = Math.max(speechGeneration, generation);
+  stopSpeech();
+  if (bubbleVisible) hideBubbleLater(Math.max(3000, bubbleRemaining));
+});
+
+function handlePetMessage(message = {}) {
+  if (message.clear) {
+    clearPresentation();
+    return;
+  }
+  const isChat = message.source === "chat";
+  if (!isChat && (conversationActive || speechActive)) {
+    // Keep only the latest recent reminder; never replay a backlog after a chat.
+    queuedNotice = { message, expiresAt: Date.now() + 60000 };
+    return;
+  }
+  const wasStreaming = bubbleStreaming;
+  bubbleStreaming = message.streaming === true;
+  const text = typeof message === "string" ? message : message.text;
+  const bubbleText = typeof message === "object" && message.bubbleText ? message.bubbleText : text;
+  const action = typeof message === "object" ? message.action : "";
+  if (isChat) {
+    voiceLineLastInteraction = Date.now();
+    stopVoiceLine();
+    scheduleIdleVoiceLine();
+    if (!conversationActive || (!wasStreaming && bubbleStreaming)) conversationAction = "idle";
+    conversationActive = true;
+    if (action && character.states[action]) conversationAction = action;
+    window.clearTimeout(idleTimer);
+    temporaryToken += 1;
+  }
+  stopSpeech();
+  showBubble(bubbleText, message.duration);
+  if (typeof message !== "object" || message.speak !== false) {
+    speakText(text);
+  }
+  if (settings.expressionMode === "automatic" && !dragStart) {
+    if (isChat) setState(conversationAction);
+    else if (action && character.states[action]) playTemporary(action, Math.max(temporaryDuration(action), 1200));
+  }
+  if (message.notification) window.desktopPet.presentNotification?.(message.notification);
+}
+
+function startupGreetingText() {
+  const hour = new Date().getHours();
+  if (hour >= 5 && hour < 11) return text("pet.greeting.morning");
+  if (hour >= 11 && hour < 14) return text("pet.greeting.noon");
+  if (hour >= 14 && hour < 18) return text("pet.greeting.afternoon");
+  if (hour >= 18 && hour < 23) return text("pet.greeting.evening");
+  return text("pet.greeting.night");
+}
+
+function scheduleStartupGreeting() {
+  if (didShowStartupGreeting) return;
+  didShowStartupGreeting = true;
+  window.setTimeout(() => {
+    handlePetMessage({ text: startupGreetingText(), action: "waving", duration: 2800, speak: false });
+  }, 650);
+}
+
+function loadSprite(spritePath) {
+  return new Promise((resolve, reject) => {
+    const nextImage = new Image();
+    nextImage.addEventListener("load", () => {
+      resolve(nextImage);
+    }, { once: true });
+    nextImage.addEventListener("error", reject, { once: true });
+    nextImage.src = spritePath;
+  });
+}
+
+canvas.addEventListener("pointerdown", beginDrag);
+canvas.addEventListener("dblclick", handleDoubleClick);
+canvas.addEventListener("pointerenter", () => {
+  if (settings.expressionMode !== "automatic" || conversationActive || dragStart || performance.now() < hoverReadyAt) return;
+  hoverReadyAt = performance.now() + 10000;
+  if (state === "idle") playTemporary("waving", 900);
+});
+window.addEventListener("pointerup", endDrag);
+function cancelDrag() {
+  if (!dragStart) return;
+  const expression = dragStart.expression;
+  dragStart = null;
+  didDrag = false;
+  window.clearInterval(dragInterval);
+  window.desktopPet.dragEnd();
+  canvas.classList.remove("dragging");
+  if (settings.expressionMode === "automatic") setState(conversationActive ? conversationAction : "idle");
+  else if (expression) setStaticExpression(expression.state, expression.frame);
+}
+window.addEventListener("blur", cancelDrag);
+window.addEventListener("pointercancel", cancelDrag);
+
+window.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+  window.desktopPet.showContextMenu();
+});
+window.addEventListener("keydown", () => { voiceLineLastInteraction = Date.now(); }, true);
+window.addEventListener("beforeunload", () => {
+  window.clearTimeout(voiceLineIdleTimer);
+  voiceLineIdleTimer = null;
+  stopVoiceLine();
+});
+
+window.desktopPet.onAppStateUpdated(applyAppState);
+window.desktopPet.onPetMessage(handlePetMessage);
+window.desktopPet.onChatStateUpdated?.((chatState) => {
+  chatRequestActive = chatState.busy === true;
+  if (chatRequestActive) {
+    voiceLineLastInteraction = Date.now();
+    stopVoiceLine();
+  }
+  scheduleIdleVoiceLine();
+});
+
+window.desktopPet.getAppState()
+  .then((initialAppState) => {
+    applyAppState(initialAppState);
+  })
+  .catch((error) => {
+    console.error("Unable to start Desktop Pet", error);
+  });

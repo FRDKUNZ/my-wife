@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Quick Companion Input</title>
+    <link rel="stylesheet" href="./quick-chat.css" />
+    <link rel="stylesheet" href="./voice-controls.css" />
+  </head>
+  <body>
+    <form id="quick-form" class="quick-shell">
+      <header class="quick-header">
+        <strong id="character-name"></strong>
+        <button id="history" type="button">记录</button>
+        <button id="settings" type="button">设置</button>
+        <button id="close" type="button" aria-label="关闭">×</button>
+      </header>
+      <textarea id="quick-input" rows="1" maxlength="1200" placeholder="和桌宠说一句..." autofocus></textarea>
+      <button id="send" type="submit">发送</button>
+      <button id="stop" type="button" hidden>停止</button>
+      <div class="quick-feedback">
+        <span id="status" role="status"></span>
+        <button id="retry-message" type="button" hidden>重试</button>
+      </div>
+      <div id="voice-controls" class="voice-controls" hidden>
+        <span id="voice-status" role="status"></span>
+        <button id="voice-toggle" type="button"></button>
+      </div>
+    </form>
+    <script src="./i18n.js"></script>
+    <script src="./chat-draft.js"></script>
+    <script src="./quick-chat.js"></script>
+    <script src="./voice-controls.js"></script>
+  </body>
+</html>

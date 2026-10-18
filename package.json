@@ -1,0 +1,89 @@
+{
+  "name": "desktop-pet",
+  "version": "0.4.2",
+  "description": "A cross-platform anime desktop pet with character packs, chat, TTS, and multilingual UI.",
+  "author": "Desktop Pet Contributors",
+  "license": "MIT",
+  "homepage": "https://github.com/TonyNa-code/desktop-pet#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TonyNa-code/desktop-pet.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TonyNa-code/desktop-pet/issues"
+  },
+  "main": "src/main.js",
+  "private": false,
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "check": "node --check src/main.js && node --check src/voice-line-library.js && node --check src/i18n.js && node --check src/preload.js && node --check src/renderer.js && node --check src/chat.js && node --check src/quick-chat.js && node --check src/chat-draft.js && node --check src/settings.js && node --check src/config-validation.js && node --check src/chat-response.js && node --check src/character-import.js && node --check src/speech-text.js && node --check src/voice-controls.js && node --check src/network-safety.js && node --check src/fish-speech-style.js && npm test && node scripts/validate-assets.js && node scripts/privacy-check.js",
+    "test": "node --test tests/*.test.js",
+    "test:smoke": "node tests/run-electron-smoke.cjs",
+    "privacy:check": "node scripts/privacy-check.js",
+    "validate:assets": "node scripts/validate-assets.js",
+    "build": "electron-builder"
+  },
+  "keywords": [
+    "desktop-pet",
+    "electron",
+    "anime",
+    "ai-companion",
+    "tts",
+    "gptsovits",
+    "multilingual",
+    "cross-platform",
+    "pet",
+    "spritesheet"
+  ],
+  "devDependencies": {
+    "electron": "^42.11.12",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "app.desktop.pet",
+    "productName": "Desktop Pet",
+    "artifactName": "Desktop-Pet-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "Rem voice line/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.entertainment"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "artifactName": "Desktop-Pet-${version}-win-${arch}-setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "Desktop-Pet-${version}-win-${arch}-portable.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "tar.gz"
+      ],
+      "icon": "build/icon.png",
+      "category": "Utility"
+    }
+  },
+  "dependencies": {
+    "fflate": "0.8.3"
+  }
+}
