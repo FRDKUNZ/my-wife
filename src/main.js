@@ -23,7 +23,7 @@ const { modelsEndpoint, readModelList } = require("./model-list");
 const { readPack, installPack } = require("./character-import");
 const { pathToFileURL } = require("node:url");
 const voiceLineLibrary = require("./voice-line-library");
-const { execFile } = require("node:child_process");
+const { execFile, spawn } = require("node:child_process");
 const { promisify } = require("node:util");
 const execFileAsync = promisify(execFile);
 
@@ -42,7 +42,7 @@ const DEFAULT_SETTINGS = {
   scale: 1,
   alwaysOnTop: true,
   restReminderMinutes: 0,
-  autonomousConversation: { enabled: false, minIntervalSeconds: 120, maxIntervalSeconds: 180 },
+  autonomousConversation: { enabled: false, minIntervalSeconds: 30, maxIntervalSeconds: 60 },
   voiceLines: { enabled: false, idleVoiceEnabled: false, idleIntervalMinSeconds: 30, idleIntervalMaxSeconds: 60, launchAtStartup: true, playGreetingOnStartup: false, startupGreetingClickFallback: false, clickCategories: ["Interactive Conversation", "Funny Reactions"], idleCategories: ["Daily Conversation", "Work & Study"], greetingCategory: "Greeting", nightCategory: "Night", nightEnabled: false, nightStart: "22:00", nightEnd: "05:00", volume: 0.7, sourceFolder: "", collections: {} },
   assistant: {
     baseUrl: "",
@@ -131,6 +131,12 @@ let autonomousRequestController = null;
 let voiceLinePlaying = false;
 let lastUserActivityAt = Date.now();
 const autonomousRecentOpeners = [];
+let foregroundDetector = null;
+let foregroundDetectorRestartTimer = null;
+let foregroundOutputBuffer = "";
+let foregroundActivity = null;
+let foregroundInputIdleMs = null;
+let foregroundInputReportAt = 0;
 let characterSessions = {};
 let voiceError = false;
 let speechGeneration = 0;
@@ -524,8 +530,8 @@ function normalizeSettings(nextSettings) {
   const rawAutonomous = { ...DEFAULT_SETTINGS.autonomousConversation, ...(nextSettings.autonomousConversation || {}) };
   const autonomousConversation = {
     enabled: rawAutonomous.enabled === true,
-    minIntervalSeconds: Math.round(clampNumber(rawAutonomous.minIntervalSeconds, 120, 3600, 120)),
-    maxIntervalSeconds: Math.round(clampNumber(rawAutonomous.maxIntervalSeconds, 120, 3600, 180)),
+    minIntervalSeconds: Math.round(clampNumber(rawAutonomous.minIntervalSeconds, 30, 3600, 30)),
+    maxIntervalSeconds: Math.round(clampNumber(rawAutonomous.maxIntervalSeconds, 30, 3600, 60)),
   };
   autonomousConversation.maxIntervalSeconds = Math.max(autonomousConversation.minIntervalSeconds, autonomousConversation.maxIntervalSeconds);
   const rawVoice = { ...DEFAULT_SETTINGS.voiceLines, ...(nextSettings.voiceLines || {}) };
@@ -985,6 +991,7 @@ function updateSettings(patch) {
   syncWindowsStartup();
   scheduleRestReminder();
   scheduleAutonomousConversation();
+  syncForegroundDetection();
   if (mainWindow) {
     mainWindow.setAlwaysOnTop(settings.alwaysOnTop);
     applyWindowSize();
@@ -1361,6 +1368,7 @@ function applyChatConfigPatch(patch = {}) {
     ttsPatch.enabled = ttsPatch.provider !== "none";
   }
   const settingsPatch = {
+    ...(patch.autonomousConversation !== undefined ? { autonomousConversation: patch.autonomousConversation } : {}),
     ...(patch.memory !== undefined ? { memory: patch.memory } : {}),
     ...(patch.voiceLines !== undefined ? { voiceLines: patch.voiceLines } : {}),
     ...(patch.interactionResponses !== undefined ? { interactionResponses: patch.interactionResponses } : {}),
@@ -1814,8 +1822,144 @@ async function sendChatMessage(_event, rawText, context) {
     if (chatRequest === request) {
       chatRequest = null;
       broadcastChatState();
+      scheduleAutonomousConversation();
     }
   }
+}
+
+function friendlyForegroundApp(processName) {
+  const name = String(processName || "").replace(/\.exe$/i, "").toLowerCase();
+  const known = {
+    "valorant-win64-shipping": "VALORANT",
+    valorant: "VALORANT",
+    code: "Visual Studio Code",
+    chrome: "Google Chrome",
+    msedge: "Microsoft Edge",
+    firefox: "Mozilla Firefox",
+    afterfx: "Adobe After Effects",
+    photoshop: "Adobe Photoshop",
+    premiere: "Adobe Premiere Pro",
+    explorer: "File Explorer",
+    notepad: "Notepad",
+    devenv: "Visual Studio",
+    idea64: "IntelliJ IDEA",
+    steam: "Steam",
+    discord: "Discord",
+    obs64: "OBS Studio",
+    leagueclient: "League of Legends",
+  };
+  return known[name] || String(processName || "").replace(/[-_]+/g, " ").slice(0, 100);
+}
+
+function acceptForegroundActivityLine(line) {
+  let value;
+  try { value = JSON.parse(line); } catch { return false; }
+  const inputIdleMs = typeof value?.idleMs === "number" ? value.idleMs : Number.NaN;
+  if (Number.isFinite(inputIdleMs) && inputIdleMs >= 0) {
+    foregroundInputIdleMs = Math.min(inputIdleMs, 24 * 60 * 60 * 1000);
+    foregroundInputReportAt = Date.now();
+  }
+  const processName = typeof value?.processName === "string" ? value.processName.trim() : "";
+  if (!processName || processName.length > 128 || /[\x00-\x1f\\/:\"]/.test(processName)) return false;
+  const ownProcessName = path.basename(process.execPath || "").replace(/\.exe$/i, "").toLowerCase();
+  if (processName.toLowerCase() === ownProcessName || ["electron", "desktop pet"].includes(processName.toLowerCase())) {
+    foregroundActivity = null;
+    return true;
+  }
+  if (foregroundActivity?.processName.toLowerCase() === processName.toLowerCase()) return true;
+  foregroundActivity = { processName, appName: friendlyForegroundApp(processName), changedAt: Date.now() };
+  return true;
+}
+
+function consumeForegroundOutput(chunk) {
+  foregroundOutputBuffer += String(chunk || "");
+  if (foregroundOutputBuffer.length > 4096 && !foregroundOutputBuffer.includes("\n")) {
+    foregroundOutputBuffer = "";
+    return;
+  }
+  const lines = foregroundOutputBuffer.split(/\r?\n/);
+  foregroundOutputBuffer = lines.pop() || "";
+  for (const line of lines) if (line.trim()) acceptForegroundActivityLine(line.trim());
+}
+
+function scheduleForegroundDetectorRestart() {
+  if (foregroundDetectorRestartTimer || process.platform !== "win32"
+    || settings.autonomousConversation?.enabled !== true || app.isQuitting) return;
+  foregroundDetectorRestartTimer = setTimeout(() => {
+    foregroundDetectorRestartTimer = null;
+    startForegroundDetection();
+  }, 15000);
+}
+
+function handleForegroundDetectorExit(child) {
+  if (foregroundDetector !== child) return;
+  foregroundDetector = null;
+  foregroundOutputBuffer = "";
+  foregroundActivity = null;
+  foregroundInputIdleMs = null;
+  foregroundInputReportAt = 0;
+  scheduleForegroundDetectorRestart();
+}
+
+function startForegroundDetection() {
+  if (process.platform !== "win32" || foregroundDetector
+    || settings.autonomousConversation?.enabled !== true || app.isQuitting) return;
+  const script = [
+    "$signature = @'",
+    "using System; using System.Runtime.InteropServices; [StructLayout(LayoutKind.Sequential)] public struct RemLastInputInfo { public uint cbSize; public uint dwTime; } public static class RemForegroundNative { [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); [DllImport(\"user32.dll\")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId); [DllImport(\"user32.dll\")] public static extern bool GetLastInputInfo(ref RemLastInputInfo info); }",
+    "'@",
+    "Add-Type -TypeDefinition $signature -ErrorAction SilentlyContinue",
+    "while ($true) {",
+    "  $hwnd = [RemForegroundNative]::GetForegroundWindow()",
+    "  if ($hwnd -ne [IntPtr]::Zero) {",
+    "    [uint32]$foregroundPid = 0",
+    "    [void][RemForegroundNative]::GetWindowThreadProcessId($hwnd, [ref]$foregroundPid)",
+    "    try {",
+    "      $foreground = Get-Process -Id $foregroundPid -ErrorAction Stop",
+    "      $processName = [string]$foreground.ProcessName",
+    "      $inputInfo = New-Object -TypeName RemLastInputInfo",
+    "      $inputInfo.cbSize = 8",
+    "      $idleMs = $null",
+    "      if ([RemForegroundNative]::GetLastInputInfo([ref]$inputInfo)) { $tick = [int64]([Environment]::TickCount64 % 4294967296); if ($tick -lt $inputInfo.dwTime) { $tick += 4294967296 }; $idleMs = $tick - $inputInfo.dwTime }",
+    "      if ($processName) { [pscustomobject]@{ processName = $processName; idleMs = $idleMs } | ConvertTo-Json -Compress }",
+    "    } catch { }",
+    "  }",
+    "  Start-Sleep -Milliseconds 1200",
+    "}",
+  ].join("\n");
+  try {
+    const child = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script], {
+      windowsHide: true, stdio: ["ignore", "pipe", "ignore"],
+    });
+    foregroundDetector = child;
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", consumeForegroundOutput);
+    child.on("error", () => handleForegroundDetectorExit(child));
+    child.on("exit", () => handleForegroundDetectorExit(child));
+  } catch {
+    scheduleForegroundDetectorRestart();
+  }
+}
+
+function stopForegroundDetection() {
+  clearTimeout(foregroundDetectorRestartTimer);
+  foregroundDetectorRestartTimer = null;
+  const child = foregroundDetector;
+  foregroundDetector = null;
+  foregroundOutputBuffer = "";
+  foregroundActivity = null;
+  foregroundInputIdleMs = null;
+  foregroundInputReportAt = 0;
+  if (child && !child.killed) child.kill();
+}
+
+function syncForegroundDetection() {
+  if (process.platform === "win32" && settings.autonomousConversation?.enabled === true) startForegroundDetection();
+  else stopForegroundDetection();
+}
+
+function foregroundInputIsRecent() {
+  return foregroundInputIdleMs !== null && Date.now() - foregroundInputReportAt < 5000 && foregroundInputIdleMs < 15000;
 }
 
 function autonomousCanSpeak() {
@@ -1827,8 +1971,9 @@ function autonomousCanSpeak() {
     && mainWindow && !mainWindow.isDestroyed()
     && !app.isQuitting && !chatRequest && !autonomousBusy && !speechSession && !voiceLinePlaying
     && !chatFocused && !hasDraft && Date.now() >= autonomousPauseUntil
-    && Date.now() - lastUserActivityAt >= 90_000
-    && Date.now() - autonomousLastSpokeAt >= 90_000;
+    && !foregroundInputIsRecent()
+    && Date.now() - lastUserActivityAt >= 30_000
+    && Date.now() - autonomousLastSpokeAt >= 30_000;
 }
 
 function scheduleAutonomousConversation(delayOverride = null) {
@@ -1851,32 +1996,59 @@ async function runAutonomousConversation() {
     scheduleAutonomousConversation(30_000);
     return;
   }
+  if (foregroundActivity && Date.now() - foregroundActivity.changedAt < 25_000) {
+    scheduleAutonomousConversation(15_000);
+    return;
+  }
   autonomousBusy = true;
   autonomousRequestController = new AbortController();
   broadcastChatState();
   const recent = autonomousRecentOpeners.slice(-8).map((item) => `- ${item}`).join("\n") || "- belum ada";
+  const activityAgeMs = foregroundActivity ? Date.now() - foregroundActivity.changedAt : 0;
+  const stableActivity = foregroundActivity && activityAgeMs >= 25_000 ? foregroundActivity : null;
+  const activityContext = stableActivity
+    ? `Aplikasi foreground yang terdeteksi lokal: ${stableActivity.appName} (proses ${stableActivity.processName}), aktif sekitar ${Math.floor(activityAgeMs / 1000)} detik.`
+    : "Tidak ada konteks aplikasi foreground yang cukup stabil; gunakan topik random bila ingin memulai obrolan.";
+  const inputIdleSeconds = foregroundInputIdleMs === null ? null : Math.floor(foregroundInputIdleMs / 1000);
+  const lastSpokeSeconds = autonomousLastSpokeAt ? Math.floor((Date.now() - autonomousLastSpokeAt) / 1000) : null;
   const openerPrompt = [
-    "Mulai percakapan secara spontan dengan Ferdi sebagai Rem. Tulis satu ucapan singkat dalam bahasa Indonesia yang natural, hangat, dan bervariasi; boleh berupa cerita, komentar, candaan, sapaan, atau pertanyaan (jangan selalu bertanya).",
-    "Pakai konteks percakapan terakhir jika relevan. Jangan mengaku tahu aktivitas, layar, atau lokasi Ferdi tanpa konteks yang nyata. Hindari mengulang pembuka/topik berikut:",
+    "Tentukan dulu apakah Rem sebaiknya berbicara sekarang. Balas tepat 'WAIT' jika pengguna kemungkinan sedang fokus dan obrolan akan mengganggu. Jika layak berbicara, balas 'SPEAK: ' diikuti satu ucapan pembuka singkat dalam bahasa Indonesia yang natural dan hangat. Variasikan pertanyaan, komentar, candaan, sapaan, dan cerita ringan; jangan selalu bertanya.",
+    `Konteks lokal: aplikasi Rem aktif dan siap; ${activityContext} Input keyboard/mouse terakhir sekitar ${inputIdleSeconds === null ? "tidak tersedia" : `${inputIdleSeconds} detik lalu`}. Waktu sejak ucapan proaktif sebelumnya: ${lastSpokeSeconds === null ? "belum pernah" : `${lastSpokeSeconds} detik`}.`,
+    "Gunakan konteks percakapan terakhir bila relevan. Nama aplikasi hanya menunjukkan aplikasi yang berada di depan; jangan menyimpulkan isi layar, aktivitas rinci, skor, ronde, kemenangan, lokasi, atau data lain yang tidak tersedia. Pilih WAIT jika Rem baru saja berbicara atau kondisi belum tepat.",
+    "Hindari mengulang pembuka/topik berikut:",
     recent,
-    "Keluarkan hanya ucapan Rem, maksimal dua kalimat. Jangan gunakan ekspresi marker.",
+    "Jika memilih SPEAK, keluarkan maksimal dua kalimat dan hanya informasi yang diketahui. Jangan tulis JSON atau penjelasan alasan.",
   ].join("\n");
   try {
     const result = await requestAssistantReply(openerPrompt, autonomousRequestController);
     autonomousBusy = false;
     autonomousRequestController = null;
     broadcastChatState();
-    if (!result.ok || !result.reply || !autonomousCanSpeak()) {
+    if (!result.ok) {
       scheduleAutonomousConversation(5 * 60_000);
       return;
     }
-    addChatMessage("assistant", result.reply);
-    autonomousRecentOpeners.push(result.reply.slice(0, 180));
+    if (/^WAIT\s*$/i.test(result.reply || "")) {
+      scheduleAutonomousConversation();
+      return;
+    }
+    const decision = /^SPEAK\s*:\s*([\s\S]+)$/i.exec(result.reply || "");
+    if (!decision || !decision[1].trim()) {
+      scheduleAutonomousConversation(5 * 60_000);
+      return;
+    }
+    if (!autonomousCanSpeak()) {
+      scheduleAutonomousConversation(30_000);
+      return;
+    }
+    const spokenText = decision[1].trim().slice(0, 600);
+    addChatMessage("assistant", spokenText);
+    autonomousRecentOpeners.push(spokenText.slice(0, 180));
     if (autonomousRecentOpeners.length > 8) autonomousRecentOpeners.shift();
     autonomousLastSpokeAt = Date.now();
     broadcastChatState();
-    sendPetMessage(result.reply, result.action || "idle", {
-      source: "chat", speak: true, bubbleText: bubblePreview(result.reply),
+    sendPetMessage(spokenText, result.action || "idle", {
+      source: "chat", speak: true, bubbleText: bubblePreview(spokenText),
     });
   } catch {
     scheduleAutonomousConversation(5 * 60_000);
@@ -2427,8 +2599,15 @@ app.whenReady().then(() => {
 
   scheduleRestReminder();
   scheduleAutonomousConversation();
+  syncForegroundDetection();
   maybeShowInitialPersonaSettings();
 });
 
 app.on("window-all-closed", () => app.quit());
-app.on("before-quit", () => { app.isQuitting = true; clearTimeout(autonomousTimer); autonomousTimer = null; speechSession?.controller?.abort(); });
+app.on("before-quit", () => {
+  app.isQuitting = true;
+  clearTimeout(autonomousTimer);
+  autonomousTimer = null;
+  stopForegroundDetection();
+  speechSession?.controller?.abort();
+});
