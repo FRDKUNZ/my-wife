@@ -550,8 +550,8 @@ function renderConfig(preserveDraft = false) {
   rememberHistoryEl.checked = config.rememberHistory === true;
   const autonomous = config.autonomousConversation || {};
   autonomousEnabledEl.checked = autonomous.enabled === true;
-  autonomousMinEl.value = String(autonomous.minIntervalSeconds ?? 30);
-  autonomousMaxEl.value = String(autonomous.maxIntervalSeconds ?? 60);
+  autonomousMinEl.value = String(autonomous.minIntervalSeconds ?? 120);
+  autonomousMaxEl.value = String(autonomous.maxIntervalSeconds ?? 240);
 
   ttsProviderEl.value = tts.enabled ? (tts.provider || "system") : "none";
   selectedVoiceName = tts.voiceName || "";
@@ -746,7 +746,7 @@ function readConfigForm(includeEmptyKey = false) {
 
   return { language: languageEl.value, characterId: selectedCharacterId, assistant, tts, persona, affection, profile,
     autonomousConversation: { enabled: autonomousEnabledEl.checked,
-      minIntervalSeconds: Number(autonomousMinEl.value || 30), maxIntervalSeconds: Number(autonomousMaxEl.value || 60) },
+      minIntervalSeconds: Number(autonomousMinEl.value || 120), maxIntervalSeconds: Number(autonomousMaxEl.value || 240) },
     memory: { enabled: memoryEnabledEl.checked, notes: memoryNotesFromForm() },
     interactionResponses: interactionResponsesEl.checked,
     rememberHistory: rememberHistoryEl.checked,

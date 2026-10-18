@@ -42,7 +42,7 @@ const DEFAULT_SETTINGS = {
   scale: 1,
   alwaysOnTop: true,
   restReminderMinutes: 0,
-  autonomousConversation: { enabled: false, minIntervalSeconds: 30, maxIntervalSeconds: 60 },
+  autonomousConversation: { enabled: false, minIntervalSeconds: 120, maxIntervalSeconds: 240 },
   voiceLines: { enabled: false, idleVoiceEnabled: false, idleIntervalMinSeconds: 30, idleIntervalMaxSeconds: 60, launchAtStartup: true, playGreetingOnStartup: false, startupGreetingClickFallback: false, clickCategories: ["Interactive Conversation", "Funny Reactions"], idleCategories: ["Daily Conversation", "Work & Study"], greetingCategory: "Greeting", nightCategory: "Night", nightEnabled: false, nightStart: "22:00", nightEnd: "05:00", volume: 0.7, sourceFolder: "", collections: {} },
   assistant: {
     baseUrl: "",
@@ -530,8 +530,8 @@ function normalizeSettings(nextSettings) {
   const rawAutonomous = { ...DEFAULT_SETTINGS.autonomousConversation, ...(nextSettings.autonomousConversation || {}) };
   const autonomousConversation = {
     enabled: rawAutonomous.enabled === true,
-    minIntervalSeconds: Math.round(clampNumber(rawAutonomous.minIntervalSeconds, 30, 3600, 30)),
-    maxIntervalSeconds: Math.round(clampNumber(rawAutonomous.maxIntervalSeconds, 30, 3600, 60)),
+    minIntervalSeconds: Math.round(clampNumber(rawAutonomous.minIntervalSeconds, 120, 3600, 120)),
+    maxIntervalSeconds: Math.round(clampNumber(rawAutonomous.maxIntervalSeconds, 120, 3600, 240)),
   };
   autonomousConversation.maxIntervalSeconds = Math.max(autonomousConversation.minIntervalSeconds, autonomousConversation.maxIntervalSeconds);
   const rawVoice = { ...DEFAULT_SETTINGS.voiceLines, ...(nextSettings.voiceLines || {}) };
@@ -2012,9 +2012,9 @@ async function runAutonomousConversation() {
   const inputIdleSeconds = foregroundInputIdleMs === null ? null : Math.floor(foregroundInputIdleMs / 1000);
   const lastSpokeSeconds = autonomousLastSpokeAt ? Math.floor((Date.now() - autonomousLastSpokeAt) / 1000) : null;
   const openerPrompt = [
-    "Tentukan dulu apakah Rem sebaiknya berbicara sekarang. Balas tepat 'WAIT' jika pengguna kemungkinan sedang fokus dan obrolan akan mengganggu. Jika layak berbicara, balas 'SPEAK: ' diikuti satu ucapan pembuka singkat dalam bahasa Indonesia yang natural dan hangat. Variasikan pertanyaan, komentar, candaan, sapaan, dan cerita ringan; jangan selalu bertanya.",
+    "Tentukan dulu apakah Rem sebaiknya berbicara sekarang. Balas tepat 'WAIT' jika tidak ada alasan alami untuk menyela, pengguna mungkin fokus, atau obrolan akan terasa dipaksakan. Jika layak, balas 'SPEAK: ' diikuti satu ucapan singkat dalam bahasa Indonesia yang natural dan hangat.",
     `Konteks lokal: aplikasi Rem aktif dan siap; ${activityContext} Input keyboard/mouse terakhir sekitar ${inputIdleSeconds === null ? "tidak tersedia" : `${inputIdleSeconds} detik lalu`}. Waktu sejak ucapan proaktif sebelumnya: ${lastSpokeSeconds === null ? "belum pernah" : `${lastSpokeSeconds} detik`}.`,
-    "Gunakan konteks percakapan terakhir bila relevan. Nama aplikasi hanya menunjukkan aplikasi yang berada di depan; jangan menyimpulkan isi layar, aktivitas rinci, skor, ronde, kemenangan, lokasi, atau data lain yang tidak tersedia. Pilih WAIT jika Rem baru saja berbicara atau kondisi belum tepat.",
+    "Jangan menyapa seolah Ferdi baru datang atau baru membuka aplikasi. Hindari pembuka 'hai/halo', menanyakan kabar atau kegiatan hari ini, dan komentar bahwa Ferdi diam kecuali konteks percakapan memang membuatnya relevan. Utamakan tindak lanjut topik sebelumnya, komentar ringan berdasarkan aplikasi yang stabil, cerita/candaan singkat, atau topik baru yang terasa spesifik. Tidak perlu berbicara pada setiap kesempatan; WAIT adalah pilihan baik jika tidak ada hal yang menarik untuk disampaikan. Nama aplikasi hanya menunjukkan aplikasi yang berada di depan; jangan menyimpulkan isi layar, aktivitas rinci, skor, ronde, kemenangan, lokasi, atau data lain yang tidak tersedia.",
     "Hindari mengulang pembuka/topik berikut:",
     recent,
     "Jika memilih SPEAK, keluarkan maksimal dua kalimat dan hanya informasi yang diketahui. Jangan tulis JSON atau penjelasan alasan.",
