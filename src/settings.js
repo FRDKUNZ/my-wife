@@ -86,6 +86,7 @@ const idleVoiceEnabledEl = document.querySelector("#idle-voice-enabled");
 const idleIntervalMinEl = document.querySelector("#idle-interval-min");
 const idleIntervalMaxEl = document.querySelector("#idle-interval-max");
 const autonomousEnabledEl = document.querySelector("#autonomous-enabled");
+const autonomousUseActivityEl = document.querySelector("#autonomous-use-activity");
 const autonomousMinEl = document.querySelector("#autonomous-min");
 const autonomousMaxEl = document.querySelector("#autonomous-max");
 const autonomousTestButton = document.querySelector("#autonomous-test");
@@ -564,6 +565,7 @@ function renderConfig(preserveDraft = false) {
   rememberHistoryEl.checked = config.rememberHistory === true;
   const autonomous = config.autonomousConversation || {};
   autonomousEnabledEl.checked = autonomous.enabled === true;
+  autonomousUseActivityEl.checked = autonomous.useActivityContext !== false;
   autonomousMinEl.value = String(autonomous.minIntervalSeconds ?? 120);
   autonomousMaxEl.value = String(autonomous.maxIntervalSeconds ?? 240);
 
@@ -759,7 +761,7 @@ function readConfigForm(includeEmptyKey = false) {
   };
 
   return { language: languageEl.value, characterId: selectedCharacterId, assistant, tts, persona, affection, profile,
-    autonomousConversation: { enabled: autonomousEnabledEl.checked,
+    autonomousConversation: { enabled: autonomousEnabledEl.checked, useActivityContext: autonomousUseActivityEl.checked,
       minIntervalSeconds: Number(autonomousMinEl.value || 120), maxIntervalSeconds: Number(autonomousMaxEl.value || 240) },
     memory: { enabled: memoryEnabledEl.checked, notes: memoryNotesFromForm() },
     interactionResponses: interactionResponsesEl.checked,

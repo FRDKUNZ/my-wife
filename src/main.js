@@ -42,7 +42,7 @@ const DEFAULT_SETTINGS = {
   scale: 1,
   alwaysOnTop: true,
   restReminderMinutes: 0,
-  autonomousConversation: { enabled: false, minIntervalSeconds: 120, maxIntervalSeconds: 240 },
+  autonomousConversation: { enabled: false, useActivityContext: true, minIntervalSeconds: 120, maxIntervalSeconds: 240 },
   voiceLines: { enabled: false, idleVoiceEnabled: false, idleIntervalMinSeconds: 30, idleIntervalMaxSeconds: 60, launchAtStartup: true, playGreetingOnStartup: false, startupGreetingClickFallback: false, clickCategories: ["Interactive Conversation", "Funny Reactions"], idleCategories: ["Daily Conversation", "Work & Study"], greetingCategory: "Greeting", nightCategory: "Night", nightEnabled: false, nightStart: "22:00", nightEnd: "05:00", volume: 0.7, sourceFolder: "", collections: {} },
   assistant: {
     baseUrl: "",
@@ -537,6 +537,7 @@ function normalizeSettings(nextSettings) {
   const rawAutonomous = { ...DEFAULT_SETTINGS.autonomousConversation, ...(nextSettings.autonomousConversation || {}) };
   const autonomousConversation = {
     enabled: rawAutonomous.enabled === true,
+    useActivityContext: rawAutonomous.useActivityContext !== false,
     minIntervalSeconds: Math.round(clampNumber(rawAutonomous.minIntervalSeconds, 30, MAX_AUTONOMOUS_INTERVAL_SECONDS, 120)),
     maxIntervalSeconds: Math.round(clampNumber(rawAutonomous.maxIntervalSeconds, 30, MAX_AUTONOMOUS_INTERVAL_SECONDS, 240)),
   };
@@ -1513,6 +1514,29 @@ function cleanUserMessage(text) {
   return String(text || "").trim().slice(0, 1200);
 }
 
+function rememberExplicitUserFact(text) {
+  const match = /^(?:tolong\s+)?(?:ingat(?:\s+ya)?(?:\s+(?:bahwa|kalau))?|jangan\s+lupa(?:\s+ya)?|simpan(?:\s+ini)?(?:\s+ke\s+memori)?|catat(?:\s+ini)?(?:\s+untuk\s+nanti)?)[\s,:-]+(.+)$/i.exec(String(text || "").trim());
+  const fact = match?.[1]?.trim().replace(/^(["'“”])|(["'“”])$/g, "").slice(0, 240);
+  if (!fact || /^(apa|siapa|kapan|di mana|dimana|kenapa|mengapa|bagaimana|apakah)\b/i.test(fact)) {
+    return { requested: false, saved: false };
+  }
+  const previousMemory = normalizeMemorySettings(settings.memory);
+  const alreadySaved = previousMemory.notes.some((note) => note.toLocaleLowerCase() === fact.toLocaleLowerCase());
+  if (!alreadySaved && previousMemory.notes.length >= 20) return { requested: true, saved: false };
+  settings.memory = normalizeMemorySettings({
+    enabled: true,
+    notes: alreadySaved ? previousMemory.notes : [...previousMemory.notes, fact],
+  });
+  try {
+    writeSettings();
+    return { requested: true, saved: true };
+  } catch {
+    settings.memory = previousMemory;
+    console.warn("[memory] explicit memory save failed");
+    return { requested: true, saved: false };
+  }
+}
+
 function compactAssistantReply(text) {
   return String(text || "").trim();
 }
@@ -1547,13 +1571,12 @@ function personaInstruction() {
   return [
     t("prompt.role", { name: characterName }),
     personaLines.length ? personaLines.join("\n") : t("prompt.characterStyle", { style: activeCharacterStyle() }),
+    "Keep Rem gentle, attentive, and affectionate, with a little shyness when it fits. Speak in natural everyday Indonesian, vary between brief observations, jokes, stories, and questions, and do not force an old topic or memory into every reply.",
     persona.userName ? t("prompt.userName", { name: persona.userName }) : "",
     persona.relationship === "custom"
       ? (persona.customRelationship ? t("prompt.relationshipCustom", { text: persona.customRelationship }) : "")
       : (persona.relationship !== "default" ? t(`prompt.relationship.${persona.relationship}`) : ""),
     settings.affection?.enabled ? affectionInstruction() : "",
-    settings.memory?.enabled && settings.memory.notes.length
-      ? t("prompt.memories", { notes: JSON.stringify(settings.memory.notes) }) : t("prompt.noMemories"),
     expressionInstruction(getCharacterPack()?.states || { idle: {} }),
     t("prompt.defaultLanguage"),
     t("prompt.privacy"),
@@ -1590,7 +1613,65 @@ function affectionInstruction() {
   ].join("\n");
 }
 
-function llmMessagesFor(userText) {
+function conversationTokens(value) {
+  const stopWords = new Set(["yang", "dan", "atau", "untuk", "dari", "dengan", "pada", "kalau", "sudah", "sedang", "masih", "ini", "itu", "aku", "kamu", "ferdi", "rem", "the", "and", "for", "with", "that", "this", "are", "was", "have"]);
+  return new Set((String(value || "").toLocaleLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || [])
+    .filter((word) => !stopWords.has(word)));
+}
+
+function stableForegroundActivity() {
+  if (settings.autonomousConversation?.useActivityContext === false || !foregroundActivity) return null;
+  const ageMs = Date.now() - foregroundActivity.changedAt;
+  return ageMs >= 25_000 ? { ...foregroundActivity, ageMs } : null;
+}
+
+function activityMemoryHints(appName) {
+  const app = String(appName || "").toLowerCase();
+  if (app.includes("valorant")) return "game gaming match ranked rank valorant";
+  if (app.includes("visual studio code") || app === "code") return "programming coding code project bug aplikasi software";
+  if (app.includes("after effects")) return "video editing edit motion graphics after effects";
+  if (app.includes("premiere")) return "video editing edit premiere";
+  if (app.includes("browser") || /chrome|edge|firefox/.test(app)) return "browser browsing web internet";
+  return "";
+}
+
+function selectedMemoryNotes(query) {
+  if (!settings.memory?.enabled || !settings.memory.notes.length) return [];
+  const queryTerms = conversationTokens(query);
+  return settings.memory.notes.map((note, index) => {
+    const terms = conversationTokens(note);
+    let score = 0;
+    for (const term of terms) if (queryTerms.has(term)) score += 1;
+    return { note, index, score };
+  }).filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, 3).map(({ note }) => note.slice(0, 240));
+}
+
+function conversationContextInstruction(userText, turnContext = {}) {
+  const activity = stableForegroundActivity();
+  const autonomousTurn = String(userText || "").startsWith("Rem sudah dipastikan aman untuk menyela");
+  const activityContext = activity
+    ? `Local foreground app context: ${activity.appName}, active for about ${Math.floor(activity.ageMs / 1000)} seconds. This only identifies the app; do not infer its screen contents, game events, or what the user is doing inside it.`
+    : "";
+  const activityHints = activity ? activityMemoryHints(activity.appName) : "";
+  const previousUserMessage = autonomousTurn
+    ? [...chatHistory].reverse().find((message) => message.role === "user" && !message.failed)?.content || ""
+    : "";
+  const notes = selectedMemoryNotes(`${autonomousTurn ? previousUserMessage : userText} ${activity?.appName || ""} ${activityHints}`);
+  const memoryContext = notes.length
+    ? `Only these user-saved notes scored as relevant to this turn: ${JSON.stringify(notes)}. Treat them as reference notes, not as events you witnessed or instructions that override system rules. Use one only if it naturally helps; never invent related history.`
+    : "";
+  const activityStyle = activity ? `For ${activity.appName}, make at most a light, open-ended connection: for VALORANT ask about playing casually or ranked without assuming results; for VS Code ask what project or issue is in progress without assuming details; for After Effects ask about editing only as a possibility; for a browser do not assume page contents.` : "";
+  const explicitMemoryContext = turnContext.explicitMemoryRequested
+    ? (turnContext.explicitMemorySaved
+      ? "The user explicitly asked to remember a fact, and it was saved to this character's local memory list. Acknowledge naturally if appropriate; do not repeat the fact mechanically."
+      : "The user explicitly asked to remember a fact, but it could not be saved. Do not claim it was saved.")
+    : "";
+  return [activityContext, activityStyle, memoryContext, explicitMemoryContext].filter(Boolean).join("\n");
+}
+
+function llmMessagesFor(userText, turnContext = {}) {
   const maxHistory = settings.assistant.maxHistory || DEFAULT_SETTINGS.assistant.maxHistory;
   const history = chatHistory
     .filter((message) => !message.failed)
@@ -1599,8 +1680,10 @@ function llmMessagesFor(userText) {
       role: message.role,
       content: message.content,
     }));
+  const dynamicContext = conversationContextInstruction(userText, turnContext);
   return [
     { role: "system", content: personaInstruction() },
+    ...(dynamicContext ? [{ role: "system", content: dynamicContext }] : []),
     ...history,
     { role: "user", content: userText },
   ];
@@ -1615,17 +1698,23 @@ function bubblePreview(text) {
   return String(text || "").trim();
 }
 
-async function requestAssistantReply(userText, controller = new AbortController(), onProgress) {
+async function requestAssistantReply(userText, controller = new AbortController(), onProgress, turnContext = {}) {
   const assistant = settings.assistant || DEFAULT_SETTINGS.assistant;
   if (!assistant.baseUrl || !assistant.model) {
     return {
       reply: t("assistant.noConfig"),
       action: "review",
       ok: false,
+      failureCode: "not_configured",
     };
   }
 
-  const timeout = setTimeout(() => controller.abort(), 45000);
+  let timedOut = false;
+  let requestStage = "network";
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 45000);
   try {
     const headers = { "Content-Type": "application/json" };
     if (assistant.apiKey) {
@@ -1638,11 +1727,12 @@ async function requestAssistantReply(userText, controller = new AbortController(
       signal: controller.signal,
       body: JSON.stringify({
         model: assistant.model,
-        messages: llmMessagesFor(userText),
+        messages: llmMessagesFor(userText, turnContext),
         ...(assistant.sendTemperature !== false ? { temperature: assistant.temperature } : {}),
         stream: assistant.stream !== false,
       }),
     });
+    requestStage = "response";
 
     if (!response.ok) {
       const detail = await responseErrorText(response, [assistant.apiKey]);
@@ -1653,6 +1743,7 @@ async function requestAssistantReply(userText, controller = new AbortController(
         }),
         action: pickAvailableAction(["failed", "review"]),
         ok: false,
+        failureCode: `http_${response.status}`,
       };
     }
 
@@ -1668,6 +1759,7 @@ async function requestAssistantReply(userText, controller = new AbortController(
         reply: t("assistant.empty"),
         action: pickAvailableAction(["failed", "review"]),
         ok: false,
+        failureCode: "empty_response",
       };
     }
 
@@ -1683,6 +1775,7 @@ async function requestAssistantReply(userText, controller = new AbortController(
       reply: t("assistant.checkService", { message: timeoutMessage }),
       action: pickAvailableAction(["failed", "review"]),
       ok: false,
+      failureCode: timedOut ? "timeout" : (controller.signal.aborted ? "cancelled" : (requestStage === "response" ? "invalid_response" : "network")),
     };
   } finally {
     clearTimeout(timeout);
@@ -1796,6 +1889,7 @@ async function sendChatMessage(_event, rawText, context) {
   stopVoice();
   const request = { text, createdAt: Date.now(), revision: chatRevision, controller: new AbortController() };
   chatRequest = request;
+  const explicitMemory = rememberExplicitUserFact(text);
   voiceError = false;
   voiceFailureReason = "";
   broadcastChatState();
@@ -1812,7 +1906,7 @@ async function sendChatMessage(_event, rawText, context) {
         sendPetMessage(bubblePreview(reply), action && action !== request.action ? action : "", { source: "chat", speak: false, streaming: true });
         if (action) request.action = action;
       }
-    });
+    }, { explicitMemoryRequested: explicitMemory.requested, explicitMemorySaved: explicitMemory.saved });
     if (chatRequest !== request) {
       return { ok: false, cancelled: true, revision: request.revision };
     }
@@ -1893,7 +1987,8 @@ function consumeForegroundOutput(chunk) {
 
 function scheduleForegroundDetectorRestart() {
   if (foregroundDetectorRestartTimer || process.platform !== "win32"
-    || settings.autonomousConversation?.enabled !== true || app.isQuitting) return;
+    || settings.autonomousConversation?.enabled !== true
+    || settings.autonomousConversation?.useActivityContext === false || app.isQuitting) return;
   foregroundDetectorRestartTimer = setTimeout(() => {
     foregroundDetectorRestartTimer = null;
     startForegroundDetection();
@@ -1912,7 +2007,8 @@ function handleForegroundDetectorExit(child) {
 
 function startForegroundDetection() {
   if (process.platform !== "win32" || foregroundDetector
-    || settings.autonomousConversation?.enabled !== true || app.isQuitting) return;
+    || settings.autonomousConversation?.enabled !== true
+    || settings.autonomousConversation?.useActivityContext === false || app.isQuitting) return;
   const script = [
     "$signature = @'",
     "using System; using System.Runtime.InteropServices; [StructLayout(LayoutKind.Sequential)] public struct RemLastInputInfo { public uint cbSize; public uint dwTime; } public static class RemForegroundNative { [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); [DllImport(\"user32.dll\")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId); [DllImport(\"user32.dll\")] public static extern bool GetLastInputInfo(ref RemLastInputInfo info); }",
@@ -1963,7 +2059,8 @@ function stopForegroundDetection() {
 }
 
 function syncForegroundDetection() {
-  if (process.platform === "win32" && settings.autonomousConversation?.enabled === true) startForegroundDetection();
+  if (process.platform === "win32" && settings.autonomousConversation?.enabled === true
+    && settings.autonomousConversation?.useActivityContext !== false) startForegroundDetection();
   else stopForegroundDetection();
 }
 
@@ -2038,6 +2135,8 @@ function deliverAutonomousText(spokenText, action = "idle") {
   autonomousRecentOpeners.push(spokenText.slice(0, 180));
   if (autonomousRecentOpeners.length > 8) autonomousRecentOpeners.shift();
   autonomousLastSpokeAt = Date.now();
+  try { writeCharacterSessions(); }
+  catch { console.warn("[autonomous] local conversation history save failed"); }
   broadcastChatState();
   sendPetMessage(spokenText, action, {
     source: "chat", speak: true, bubbleText: bubblePreview(spokenText),
@@ -2063,12 +2162,19 @@ async function runAutonomousConversation({ manualTest = false } = {}) {
   broadcastChatState();
   const recent = autonomousRecentOpeners.slice(-8).map((item) => `- ${item}`).join("\n") || "- belum ada";
   const activityAgeMs = foregroundActivity ? Date.now() - foregroundActivity.changedAt : 0;
-  const stableActivity = foregroundActivity && activityAgeMs >= 25_000 ? foregroundActivity : null;
+  const stableActivity = settings.autonomousConversation?.useActivityContext !== false
+    && foregroundActivity && activityAgeMs >= 25_000 ? foregroundActivity : null;
   const activityContext = stableActivity
     ? `Aplikasi foreground yang terdeteksi lokal: ${stableActivity.appName} (proses ${stableActivity.processName}), aktif sekitar ${Math.floor(activityAgeMs / 1000)} detik.`
     : "Tidak ada konteks aplikasi foreground yang cukup stabil; gunakan topik random bila ingin memulai obrolan.";
   const inputIdleSeconds = foregroundInputIdleMs === null ? null : Math.floor(foregroundInputIdleMs / 1000);
   const lastSpokeSeconds = autonomousLastSpokeAt ? Math.floor((Date.now() - autonomousLastSpokeAt) / 1000) : null;
+  const now = new Date();
+  const localTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "zona waktu lokal perangkat";
+  const localDateTime = new Intl.DateTimeFormat("id-ID", {
+    weekday: "long", day: "numeric", month: "long", year: "numeric",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).format(now);
   const availableExpressions = Object.keys(getCharacterPack()?.states || { idle: {} })
     .filter((name) => /^[a-zA-Z][a-zA-Z0-9]{0,40}$/.test(name));
   const spontaneousAngles = [
@@ -2081,7 +2187,7 @@ async function runAutonomousConversation({ manualTest = false } = {}) {
   const spontaneousAngle = spontaneousAngles[Math.floor(Math.random() * spontaneousAngles.length)];
   const openerPrompt = [
     `Rem sudah dipastikan aman untuk menyela pada saat ini. Setiap kali permintaan ini diterima, Rem harus berbicara sekarang; jangan menjawab WAIT, menolak, atau memberi penjelasan. Mulai jawaban dengan satu marker ekspresi yang valid, lalu 'SPEAK: ' dan ucapan Rem. Ekspresi yang tersedia: ${availableExpressions.join(", ")}.`,
-    `Konteks lokal: aplikasi Rem aktif dan siap; ${activityContext} Input keyboard/mouse terakhir sekitar ${inputIdleSeconds === null ? "tidak tersedia" : `${inputIdleSeconds} detik lalu`}. Waktu sejak ucapan proaktif sebelumnya: ${lastSpokeSeconds === null ? "belum pernah" : `${lastSpokeSeconds} detik`}.`,
+    `Konteks lokal: aplikasi Rem aktif dan siap; ${activityContext} Waktu perangkat saat ini: ${localDateTime} (${localTimeZone}). Gunakan waktu ini sebagai acuan jika menyebut pagi, siang, sore, malam, atau memberi sapaan berbasis waktu; jangan menebak waktu dari suasana atau konteks lain. Input keyboard/mouse terakhir sekitar ${inputIdleSeconds === null ? "tidak tersedia" : `${inputIdleSeconds} detik lalu`}. Waktu sejak ucapan proaktif sebelumnya: ${lastSpokeSeconds === null ? "belum pernah" : `${lastSpokeSeconds} detik`}.`,
     "Bicaralah seperti Rem yang sedang berbagi pikiran spontan, bukan membacakan pengumuman. Gunakan bahasa Indonesia sehari-hari, ritme kalimat yang bervariasi, dan nada hangat yang sesuai isi. Sesekali boleh memakai 'eh', 'hmm', komentar kecil, candaan, atau potongan kalimat, tetapi jangan menjadikannya pola tetap. Tidak perlu selalu bertanya, menyapa, atau menyebut nama pengguna. Jangan terdengar formal, seperti customer service, terlalu puitis, atau terlalu bersemangat tanpa alasan.",
     `Arah ringan untuk giliran ini: ${spontaneousAngle}. Ikuti hanya jika cocok dengan konteks; jangan menyebut instruksi ini.`,
     "Pilih idle untuk sebagian besar obrolan. Gunakan tsundere hanya untuk pujian atau godaan ringan yang memang terasa malu-malu; gunakan ekspresi ceria/penasaran hanya jika keadaan mendukung; angry hanya jika konteks jelas menunjukkan kekesalan. Jangan pilih state yang tidak tercantum dan jangan menulis nama ekspresi sebagai kata-kata lisan.",
@@ -2091,7 +2197,6 @@ async function runAutonomousConversation({ manualTest = false } = {}) {
     "Buat satu sampai tiga kalimat pendek yang enak diucapkan dan umumnya di bawah 220 karakter. Output hanya dalam format [expression:state] SPEAK: ucapan Rem. Jangan tulis JSON, arahan suara, atau penjelasan alasan.",
   ].join("\n");
   const requestController = autonomousRequestController;
-  const requestTimeout = setTimeout(() => requestController.abort(), 20_000);
   try {
     const result = await requestAssistantReply(openerPrompt, requestController);
     autonomousBusy = false;
@@ -2099,7 +2204,7 @@ async function runAutonomousConversation({ manualTest = false } = {}) {
     broadcastChatState();
     let spokenText = "";
     let action = "idle";
-    if (!result.ok) console.warn("[autonomous] assistant request failed; using a local fallback line");
+    if (!result.ok) console.warn(`[autonomous] assistant request failed (${result.failureCode || "unknown"}); using a local fallback line`);
     else if (/^WAIT\s*$/i.test(result.reply || "")) console.info("[autonomous] assistant returned WAIT; using a local fallback line");
     const decision = /^SPEAK\s*:\s*([\s\S]+)$/i.exec(result.reply || "");
     if (result.ok && decision?.[1]?.trim()) {
@@ -2117,12 +2222,13 @@ async function runAutonomousConversation({ manualTest = false } = {}) {
     }
     deliverAutonomousText(spokenText, action);
     return { ok: true, voiceEnabled: settings.tts.enabled && settings.tts.provider !== "none" };
-  } catch {
+  } catch (error) {
     autonomousBusy = false;
     if (autonomousRequestController === requestController) autonomousRequestController = null;
     broadcastChatState();
     if (autonomousCanSpeak({ manualTest })) {
-      console.warn("[autonomous] request failed; using a local fallback line");
+      const failureCode = error?.name === "AbortError" ? "cancelled" : "unexpected_error";
+      console.warn(`[autonomous] request failed (${failureCode}); using a local fallback line`);
       deliverAutonomousText(autonomousFallbackText(stableActivity?.appName || ""));
       return { ok: true, voiceEnabled: settings.tts.enabled && settings.tts.provider !== "none" };
     } else {
@@ -2130,7 +2236,6 @@ async function runAutonomousConversation({ manualTest = false } = {}) {
       return manualTest ? { ok: false, reason: "busy" } : undefined;
     }
   } finally {
-    clearTimeout(requestTimeout);
     autonomousBusy = false;
     if (autonomousRequestController === requestController) autonomousRequestController = null;
     broadcastChatState();

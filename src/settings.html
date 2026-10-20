@@ -186,6 +186,7 @@
         <h3>Autonomous conversation</h3>
         <p class="hint">Rem can start a short chat when you are idle. Requires a configured chat model. On Windows, only the foreground process name is sent to that model when an eligible proactive check runs; window titles and screen contents are not collected.</p>
         <label class="check-row"><input id="autonomous-enabled" type="checkbox" /><span>Enable Autonomous Conversation</span></label>
+        <label class="check-row"><input id="autonomous-use-activity" type="checkbox" /><span>Use foreground app context (local app name only)</span></label>
         <p class="hint">Use any interval of 30 seconds or longer. There is no configured maximum; long waits are scheduled safely in timer-sized parts.</p>
         <div class="split-row">
           <label><span>Minimum interval (seconds)</span><input id="autonomous-min" type="number" min="30" step="1" /></label>

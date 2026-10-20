@@ -17,7 +17,7 @@ test("shared memories default off, normalize bounded notes, and never extract ch
   assert.ok(memory.notes.length <= 20);
 });
 
-test("memory saves make no network call and only enabled notes enter outgoing model context", async () => {
+test("memory saves stay local and only relevant enabled notes enter outgoing model context", async () => {
   const requests = [];
   const app = loadMain({ fetch: async (_url, options) => {
     requests.push(JSON.parse(options.body));
@@ -28,13 +28,13 @@ test("memory saves make no network call and only enabled notes enter outgoing mo
   await app.run('sendChatMessage(null,"Hello")');
   assert.doesNotMatch(JSON.stringify(requests.at(-1)), /Enjoys piano/);
   app.run('applyChatConfigPatch({memory:{enabled:true}})');
-  await app.run('sendChatMessage(null,"Hello again")');
-  assert.match(requests.at(-1).messages[0].content, /Enjoys piano/);
+  await app.run('sendChatMessage(null,"I was thinking about piano")');
+  assert.match(JSON.stringify(requests.at(-1).messages), /Enjoys piano/);
   assert.equal(requests.length, 2);
   assert.equal(app.run("settings.memory.notes.length"), 1);
   app.run('applyChatConfigPatch({memory:{enabled:false}})');
   await app.run('sendChatMessage(null,"Another hello")');
-  assert.doesNotMatch(requests.at(-1).messages[0].content, /Enjoys piano/);
+  assert.doesNotMatch(JSON.stringify(requests.at(-1).messages), /Enjoys piano/);
   assert.equal(app.run("settings.memory.notes.length"), 1);
 });
 
@@ -93,7 +93,7 @@ test("memory limits reject invalid saves instead of silently dropping notes", ()
   assert.equal(validation.validate({ memory: { notes: Array(20).fill("x".repeat(240)) } }), null);
   for (const language of ["en-US", "zh-CN", "ja-JP"]) {
     app.run(`settings = normalizeSettings({language:${JSON.stringify(language)},memory:{enabled:true,notes:["Example note"]}})`);
-    assert.match(app.run("personaInstruction()"), /Example note/);
+    assert.match(app.run('conversationContextInstruction("Example note")'), /Example note/);
     assert.doesNotMatch(app.run("personaInstruction()"), /prompt\.memories|undefined/);
   }
 });

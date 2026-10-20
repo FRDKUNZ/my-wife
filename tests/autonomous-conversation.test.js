@@ -28,6 +28,7 @@ function readyMain() {
 
 test("autonomous conversation adds an assistant message and schedules a fresh random interval", async () => {
   const app = readyMain();
+  app.run("settings.rememberHistory = true");
   app.run(`requestAssistantReply = async (prompt) => { globalThis.autonomousPrompt = prompt; return { ok: true, reply: "SPEAK: Ferdi, aku kepikiran ramen hangat!", action: "waving" }; }`);
   await app.run("runAutonomousConversation()");
 
@@ -50,6 +51,9 @@ test("autonomous conversation adds an assistant message and schedules a fresh ra
   assert.match(app.run("lastAutonomousPrompt"), /Ferdi, aku kepikiran ramen hangat!/);
   assert.equal(app.run("chatHistory.length"), 2);
   assert.equal(app.run("chatHistory.every((message) => message.role === 'assistant')"), true);
+  app.run("readSettings(); readCharacterSessions()");
+  assert.equal(app.run("chatHistory.length"), 2);
+  assert.equal(app.run("chatHistory.every((message) => message.role === 'assistant')"), true);
 });
 
 test("autonomous timer randomizes its delay and replaces the previous timer", () => {
@@ -59,6 +63,7 @@ test("autonomous timer randomizes its delay and replaces the previous timer", ()
   assert.equal(app.run("autonomousTimer.cancelled"), false);
   assert.equal(app.run("autonomousTimer.delay"), 180000);
   assert.equal(app.run("normalizeSettings({}).autonomousConversation.enabled"), false);
+  assert.equal(app.run("normalizeSettings({}).autonomousConversation.useActivityContext"), true);
   assert.equal(app.run("normalizeSettings({}).autonomousConversation.minIntervalSeconds"), 120);
   assert.equal(app.run("normalizeSettings({}).autonomousConversation.maxIntervalSeconds"), 240);
   assert.equal(app.run("normalizeSettings({autonomousConversation:{minIntervalSeconds:30,maxIntervalSeconds:86400}}).autonomousConversation.maxIntervalSeconds"), 86400);
@@ -66,6 +71,50 @@ test("autonomous timer randomizes its delay and replaces the previous timer", ()
   assert.equal(app.run("settings.autonomousConversation.enabled"), true);
   assert.equal(app.run("settings.autonomousConversation.minIntervalSeconds"), 145);
   assert.equal(app.run("settings.autonomousConversation.maxIntervalSeconds"), 175);
+});
+
+test("AI context uses stable foreground app and selects only relevant saved memories", () => {
+  const app = readyMain();
+  app.run(`
+    settings.memory = { enabled: true, notes: [
+      "Ferdi sedang memperbaiki bug animasi di Desktop Pet Rem",
+      "Ferdi suka ramen pedas"
+    ] };
+    foregroundActivity = { appName: "Visual Studio Code", processName: "Code", changedAt: Date.now() - 30000 };
+  `);
+  const context = app.run('conversationContextInstruction("Masih mengerjakan bug project?", {})');
+  assert.match(context, /Visual Studio Code/);
+  assert.match(context, /bug animasi di Desktop Pet Rem/);
+  assert.doesNotMatch(context, /ramen pedas/);
+
+  app.run("settings.autonomousConversation.useActivityContext = false");
+  const privateContext = app.run('conversationContextInstruction("Masih mengerjakan bug project?", {})');
+  assert.doesNotMatch(privateContext, /Visual Studio Code/);
+});
+
+test("explicit remember requests are saved locally and questions are not stored as memories", () => {
+  const app = readyMain();
+  const result = app.run('rememberExplicitUserFact("Tolong ingat ya, project utama Ferdi adalah Desktop Pet Rem")');
+  assert.equal(result.requested, true);
+  assert.equal(result.saved, true);
+  assert.equal(app.run("settings.memory.enabled"), true);
+  assert.equal(app.run('settings.memory.notes.includes("project utama Ferdi adalah Desktop Pet Rem")'), true);
+  app.run("readSettings(); readCharacterSessions()");
+  assert.equal(app.run("settings.memory.enabled"), true);
+  assert.equal(app.run('settings.memory.notes.includes("project utama Ferdi adalah Desktop Pet Rem")'), true);
+  const question = app.run('rememberExplicitUserFact("Ingat, kapan project ini selesai?")');
+  assert.equal(question.requested, false);
+  assert.equal(app.run("settings.memory.notes.length"), 1);
+});
+
+test("assistant failures expose safe diagnostic categories without sensitive details", async () => {
+  const app = loadMain({ fetch: async () => new Response("Unauthorized", { status: 401 }) });
+  const unconfigured = await app.run('requestAssistantReply("test")');
+  assert.equal(unconfigured.failureCode, "not_configured");
+  app.run('settings.assistant = { ...DEFAULT_SETTINGS.assistant, baseUrl: "https://chat.example/v1", model: "test", apiKey: "private-key" }');
+  const rejected = await app.run('requestAssistantReply("test")');
+  assert.equal(rejected.failureCode, "http_401");
+  assert.doesNotMatch(rejected.failureCode, /private-key|Unauthorized/);
 });
 
 test("autonomous intervals above the native timer limit are safely chained without firing early", () => {
