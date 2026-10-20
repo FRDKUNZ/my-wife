@@ -29,6 +29,10 @@ contextBridge.exposeInMainWorld("desktopPet", {
   listAssistantModels: (patch) => ipcRenderer.invoke("list-assistant-models", patch),
   testTtsConnection: (patch) => ipcRenderer.invoke("test-tts-connection", patch),
   sendChatMessage: (text, context) => ipcRenderer.invoke("send-chat-message", text, context),
+  reactToClick: (kind, clickCount) => ipcRenderer.invoke("react-to-click", kind, {
+    milestone: Number.isInteger(clickCount) && clickCount >= 5 && clickCount % 5 === 0,
+    clickCount,
+  }),
   setChatDraft: (draft) => ipcRenderer.send("set-chat-draft", draft),
   onChatDraftUpdated: (callback) => {
     const listener = (_event, draft) => callback(draft);

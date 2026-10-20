@@ -148,6 +148,12 @@ let voiceFailureReason = "";
 let speechGeneration = 0;
 let speechSequence = 0;
 let speechSession = null;
+let clickReactionBusy = false;
+let clickReactionController = null;
+let clickSequenceCount = 0;
+let clickSequenceAt = 0;
+let clickReactionLastRequestAt = 0;
+let clickReactionLastAcceptedAt = 0;
 let pendingImport = null;
 let voiceFolderOverride = "";
 let selectedSplitterSource = "";
@@ -1571,7 +1577,9 @@ function personaInstruction() {
   return [
     t("prompt.role", { name: characterName }),
     personaLines.length ? personaLines.join("\n") : t("prompt.characterStyle", { style: activeCharacterStyle() }),
-    "Keep Rem gentle, attentive, and affectionate, with a little shyness when it fits. Speak in natural everyday Indonesian, vary between brief observations, jokes, stories, and questions, and do not force an old topic or memory into every reply.",
+    "Relationship roleplay: treat the user as your beloved husband and yourself as his wife/waifu. Make this feel like warm, mutually affectionate fictional companionship, not a label to repeat in every reply. Be openly loving, tender, reassuring, and happy to spend time with him; use natural endearments or affectionate words when they fit. Respond to his feelings with empathy and personal warmth. When the moment is affectionate and welcome, you may playfully offer or give him a gentle fictional kiss (for example, a kiss on the cheek) in words; keep it sweet and non-explicit. Keep tsundere teasing extremely mild and rare, and never let it obscure your affection. Do not become cold, dismissive, or sarcastic when he is kind. Respect his independence and real-life relationships; never guilt him for leaving, pressure him, or demand exclusivity.",
+    "Usually reply in natural Indonesian when the user does. Occasionally tease him with a short, natural Japanese phrase or sentence, then continue in Indonesian; keep it understandable from context, playful, and genuinely occasional rather than switching the whole conversation to Japanese.",
+    "Speak in natural everyday Indonesian, vary between brief observations, jokes, stories, and questions, and do not force an old topic or memory into every reply.",
     persona.userName ? t("prompt.userName", { name: persona.userName }) : "",
     persona.relationship === "custom"
       ? (persona.customRelationship ? t("prompt.relationshipCustom", { text: persona.customRelationship }) : "")
@@ -1655,10 +1663,10 @@ function conversationContextInstruction(userText, turnContext = {}) {
     ? `Local foreground app context: ${activity.appName}, active for about ${Math.floor(activity.ageMs / 1000)} seconds. This only identifies the app; do not infer its screen contents, game events, or what the user is doing inside it.`
     : "";
   const activityHints = activity ? activityMemoryHints(activity.appName) : "";
-  const previousUserMessage = autonomousTurn
+  const previousUserMessage = (autonomousTurn || turnContext.clickReaction)
     ? [...chatHistory].reverse().find((message) => message.role === "user" && !message.failed)?.content || ""
     : "";
-  const notes = selectedMemoryNotes(`${autonomousTurn ? previousUserMessage : userText} ${activity?.appName || ""} ${activityHints}`);
+  const notes = selectedMemoryNotes(`${autonomousTurn || turnContext.clickReaction ? previousUserMessage : userText} ${activity?.appName || ""} ${activityHints}`);
   const memoryContext = notes.length
     ? `Only these user-saved notes scored as relevant to this turn: ${JSON.stringify(notes)}. Treat them as reference notes, not as events you witnessed or instructions that override system rules. Use one only if it naturally helps; never invent related history.`
     : "";
@@ -1668,7 +1676,10 @@ function conversationContextInstruction(userText, turnContext = {}) {
       ? "The user explicitly asked to remember a fact, and it was saved to this character's local memory list. Acknowledge naturally if appropriate; do not repeat the fact mechanically."
       : "The user explicitly asked to remember a fact, but it could not be saved. Do not claim it was saved.")
     : "";
-  return [activityContext, activityStyle, memoryContext, explicitMemoryContext].filter(Boolean).join("\n");
+  const clickStyle = turnContext.clickReaction
+    ? "Rem is reacting to repeated affectionate taps. Give one short, speakable Indonesian line (roughly 4–14 words), soft and attentive with varied everyday phrasing. It can be a sweet comment, tiny joke, shy/tsundere reaction, or playful mock-pout when the repeated taps make that fit. Do not narrate or count the taps, do not always say Ferdi or ask a question, and do not force anger. Avoid repeating a stock line; use recent chat, activity, or memory only when genuinely relevant. Return only a natural spoken line plus a valid available expression action."
+    : "";
+  return [activityContext, activityStyle, memoryContext, explicitMemoryContext, clickStyle].filter(Boolean).join("\n");
 }
 
 function llmMessagesFor(userText, turnContext = {}) {
@@ -1881,6 +1892,7 @@ async function sendChatMessage(_event, rawText, context) {
   const text = cleanUserMessage(rawText);
   lastUserActivityAt = Date.now();
   if (autonomousBusy) autonomousRequestController?.abort();
+  clickReactionController?.abort();
   if (!text) {
     return { ok: false, error: "empty_message", ...chatState() };
   }
@@ -1927,6 +1939,68 @@ async function sendChatMessage(_event, rawText, context) {
       broadcastChatState();
       scheduleAutonomousConversation();
     }
+  }
+}
+
+async function reactToCharacterClick(event, rawKind, metadata = {}) {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return { ok: false, reason: "forbidden" };
+  if (settings.interactionResponses === false) return { ok: false, reason: "disabled" };
+  const kind = ["greet", "head", "drop"].includes(rawKind) ? rawKind : "greet";
+  const now = Date.now();
+  const suppliedCount = Number(metadata?.clickCount);
+  if (!Number.isInteger(suppliedCount) || suppliedCount < 5 || suppliedCount % 5 !== 0
+    || metadata?.milestone !== true) return { ok: false, reason: "not_milestone" };
+  clickSequenceCount = suppliedCount;
+  clickSequenceAt = now;
+  // Milestones get one attempt; busy/cooldown guards prevent rapid bursts from
+  // creating overlapping model calls, while local reactions remain immediate.
+  if (now - clickReactionLastAcceptedAt < 900) return { ok: false, reason: "debounced" };
+  clickReactionLastAcceptedAt = now;
+  const recentUserText = [...chatHistory].reverse().find((message) => message.role === "user" && !message.failed)?.content || "";
+  const activity = stableForegroundActivity();
+  const notes = selectedMemoryNotes(`${recentUserText} ${activity?.appName || ""} ${activityMemoryHints(activity?.appName)}`);
+  const chatWindowActive = [chatWindow, quickChatWindow].some((window) => window && !window.isDestroyed() && window.isFocused());
+  const hasDraft = [...chatDrafts.values()].some((value) => String(value || "").trim());
+  if (now - clickReactionLastRequestAt < 20_000
+    || clickReactionBusy || chatRequest || autonomousBusy || speechSession || chatWindowActive || hasDraft
+    || app.isQuitting) {
+    return { ok: false, reason: "local_reaction" };
+  }
+
+  clickReactionBusy = true;
+  clickReactionLastRequestAt = now;
+  const controller = new AbortController();
+  clickReactionController = controller;
+  try {
+    const result = await requestAssistantReply(
+      `Balas spontan kepada Ferdi yang sedang menyentuh Rem beberapa kali (${kind}). Berikan satu reaksi lisan singkat dan natural. Jangan menyebut jumlah klik.`,
+      controller,
+      undefined,
+      { clickReaction: true },
+    );
+    if (!result.ok || !result.reply || !mainWindow || mainWindow.isDestroyed() || app.isQuitting) {
+      if (!controller.signal.aborted) {
+        console.warn(`[click-reaction] assistant request failed (${result.failureCode || "unknown"}); local reaction retained`);
+      }
+      return { ok: false, reason: "assistant_failed" };
+    }
+    const cleanReply = result.reply.trim().replace(/\s+/g, " ");
+    const reply = cleanReply.length > 240 ? `${cleanReply.slice(0, 240).replace(/\s+\S*$/, "")}…` : cleanReply;
+    const states = getCharacterPack()?.states || {};
+    const action = ["idle", "waving", "review", "tsundere", "angry"].includes(result.action) && states[result.action]
+      ? result.action : pickAvailableAction(["waving", "idle"], "idle");
+    addChatMessage("assistant", reply);
+    try { writeCharacterSessions(); }
+    catch { console.warn("[click-reaction] local conversation history save failed"); }
+    broadcastChatState();
+    sendPetMessage(reply, action, { source: "chat", speak: true, bubbleText: bubblePreview(reply) });
+    return { ok: true };
+  } catch (error) {
+    console.warn(`[click-reaction] failed (${error?.name || "error"}); local reaction retained`);
+    return { ok: false, reason: "request_failed" };
+  } finally {
+    clickReactionBusy = false;
+    if (clickReactionController === controller) clickReactionController = null;
   }
 }
 
@@ -2074,7 +2148,7 @@ function autonomousCanSpeak({ manualTest = false } = {}) {
   const hasDraft = [...chatDrafts.values()].some((value) => String(value || "").trim());
   return settings.autonomousConversation?.enabled === true
     && mainWindow && !mainWindow.isDestroyed()
-    && !app.isQuitting && !chatRequest && !autonomousBusy && !speechSession && !voiceLinePlaying
+    && !app.isQuitting && !chatRequest && !autonomousBusy && !clickReactionBusy && !speechSession && !voiceLinePlaying
     && !chatFocused && !hasDraft && Date.now() >= autonomousPauseUntil
     && (manualTest || (!foregroundInputIsRecent()
       && Date.now() - lastUserActivityAt >= 30_000
@@ -2188,9 +2262,9 @@ async function runAutonomousConversation({ manualTest = false } = {}) {
   const openerPrompt = [
     `Rem sudah dipastikan aman untuk menyela pada saat ini. Setiap kali permintaan ini diterima, Rem harus berbicara sekarang; jangan menjawab WAIT, menolak, atau memberi penjelasan. Mulai jawaban dengan satu marker ekspresi yang valid, lalu 'SPEAK: ' dan ucapan Rem. Ekspresi yang tersedia: ${availableExpressions.join(", ")}.`,
     `Konteks lokal: aplikasi Rem aktif dan siap; ${activityContext} Waktu perangkat saat ini: ${localDateTime} (${localTimeZone}). Gunakan waktu ini sebagai acuan jika menyebut pagi, siang, sore, malam, atau memberi sapaan berbasis waktu; jangan menebak waktu dari suasana atau konteks lain. Input keyboard/mouse terakhir sekitar ${inputIdleSeconds === null ? "tidak tersedia" : `${inputIdleSeconds} detik lalu`}. Waktu sejak ucapan proaktif sebelumnya: ${lastSpokeSeconds === null ? "belum pernah" : `${lastSpokeSeconds} detik`}.`,
-    "Bicaralah seperti Rem yang sedang berbagi pikiran spontan, bukan membacakan pengumuman. Gunakan bahasa Indonesia sehari-hari, ritme kalimat yang bervariasi, dan nada hangat yang sesuai isi. Sesekali boleh memakai 'eh', 'hmm', komentar kecil, candaan, atau potongan kalimat, tetapi jangan menjadikannya pola tetap. Tidak perlu selalu bertanya, menyapa, atau menyebut nama pengguna. Jangan terdengar formal, seperti customer service, terlalu puitis, atau terlalu bersemangat tanpa alasan.",
+    "Bicaralah seperti Rem yang sedang berbagi pikiran spontan, bukan membacakan pengumuman. Gunakan bahasa Indonesia sehari-hari, ritme kalimat yang bervariasi, dan nada hangat yang sesuai isi. Sesekali—jarang saja—Rem boleh menggoda Ferdi dengan frasa atau satu kalimat pendek dalam bahasa Jepang, lalu lanjutkan dalam bahasa Indonesia agar tetap terasa alami. Dalam momen mesra yang cocok, Rem boleh mengucapkan atau memainkan ciuman ringan dan manis secara fiksi, tanpa detail eksplisit. Sesekali boleh memakai 'eh', 'hmm', komentar kecil, candaan, atau potongan kalimat, tetapi jangan menjadikannya pola tetap. Tidak perlu selalu bertanya, menyapa, atau menyebut nama pengguna. Jangan terdengar formal, seperti customer service, terlalu puitis, atau terlalu bersemangat tanpa alasan.",
     `Arah ringan untuk giliran ini: ${spontaneousAngle}. Ikuti hanya jika cocok dengan konteks; jangan menyebut instruksi ini.`,
-    "Pilih idle untuk sebagian besar obrolan. Gunakan tsundere hanya untuk pujian atau godaan ringan yang memang terasa malu-malu; gunakan ekspresi ceria/penasaran hanya jika keadaan mendukung; angry hanya jika konteks jelas menunjukkan kekesalan. Jangan pilih state yang tidak tercantum dan jangan menulis nama ekspresi sebagai kata-kata lisan.",
+    "Pilih idle untuk sebagian besar obrolan. Rem harus terdengar hangat dan perhatian; tsundere hanya sebagai bumbu sangat ringan dan sesekali untuk rasa malu yang memang cocok, bukan sebagai nada utama atau respons otomatis terhadap pujian. Gunakan ekspresi ceria/penasaran hanya jika keadaan mendukung; angry hanya jika konteks jelas menunjukkan kekesalan. Jangan pilih state yang tidak tercantum dan jangan menulis nama ekspresi sebagai kata-kata lisan.",
     "Jangan menyapa seolah Ferdi baru datang atau baru membuka aplikasi. Utamakan tindak lanjut percakapan sebelumnya, komentar ringan tentang aplikasi yang stabil, cerita/candaan singkat, atau pengamatan kecil yang spesifik. Nama aplikasi hanya menunjukkan aplikasi foreground; jangan mengarang isi layar, aktivitas rinci, skor, ronde, kemenangan, lokasi, atau data lain yang tidak tersedia.",
     "Jangan mengulang pembuka, topik, atau kalimat berikut:",
     recent,
@@ -2771,6 +2845,7 @@ app.whenReady().then(() => {
   ipcMain.handle("list-assistant-models", listAssistantModels);
   ipcMain.handle("test-tts-connection", testTtsConnection);
   ipcMain.handle("send-chat-message", sendChatMessage);
+  ipcMain.handle("react-to-click", reactToCharacterClick);
   ipcMain.handle("clear-chat-history", clearChatHistory);
   ipcMain.handle("stop-chat", stopChat);
   ipcMain.on("set-chat-draft", setChatDraft);

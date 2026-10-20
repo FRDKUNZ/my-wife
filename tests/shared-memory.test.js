@@ -146,6 +146,95 @@ test("automatic head touches and greetings use distinct local poses and keep the
   assert.equal(pet.audio.length, 0);
 });
 
+test("repeated pet clicks vary locally without calling AI before the milestone", () => {
+  let clickRequests = 0;
+  const pet = loadPet({ reactToClick: () => { clickRequests += 1; return Promise.resolve({ ok: false }); } });
+  pet.run('settings.expressionMode="automatic"; settings.interactionResponses=true; handleClick("greet")');
+  const first = pet.bubble.textContent;
+  pet.run('dismissBubble(); interactionReadyAt=0; handleClick("greet"); dismissBubble(); interactionReadyAt=0; handleClick("greet")');
+  assert.equal(clickRequests, 0);
+  assert.notEqual(pet.bubble.textContent, first);
+  assert.equal(pet.run("clickReactionSequenceCount"), 3);
+});
+
+test("double-clicks are treated as pet interactions without requesting milestone AI early", () => {
+  let clickRequests = 0;
+  const pet = loadPet({ reactToClick: () => { clickRequests += 1; return Promise.resolve({ ok: false }); } });
+  pet.run('settings.expressionMode="automatic"; settings.interactionResponses=true; handleDoubleClick()');
+  assert.equal(clickRequests, 0);
+  assert.notEqual(pet.bubble.textContent, "");
+  pet.run("handleDoubleClick()");
+  assert.equal(clickRequests, 0);
+});
+
+test("click milestones still reach the shared reaction handler in click-only mode", () => {
+  const milestones = [];
+  const pet = loadPet({ reactToClick: (_kind, count) => { milestones.push(count); return Promise.resolve({ ok: false }); } });
+  pet.run('settings.expressionMode="clickOnly"; settings.interactionResponses=true; handleClick("greet", true, 5)');
+  assert.deepEqual(milestones, [5]);
+});
+
+test("five and ten click milestones ask AI for a natural voiced reaction", async () => {
+  const requestedCategories = [];
+  const milestones = [];
+  const pet = loadPet({
+    reactToClick: (_kind, count) => { milestones.push(count); return Promise.resolve({ ok: false }); },
+    getRandomVoiceLine: async (categories) => {
+      requestedCategories.push(categories);
+      return { ok: true, data: "dGVzdA==" };
+    },
+  });
+  pet.run('settings.expressionMode="automatic"; settings.interactionResponses=true; settings.voiceLines={enabled:true,clickCategories:["Interactive Conversation"]};');
+  for (let detail = 1; detail <= 10; detail += 1) {
+    pet.events.pointerdown({ button: 0, clientY: 100, screenX: 10, screenY: 10 });
+    pet.events.pointerup({ detail });
+    if (detail === 2) pet.events.dblclick({ detail: 2 });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(milestones, [5, 10]);
+  assert.equal(requestedCategories.length, 2); // existing voice clip is failure fallback
+  assert.ok(pet.audio.length <= 1);
+  assert.equal(pet.run("clickReactionSequenceCount"), 10);
+});
+
+test("click reaction prompt combines only relevant activity and saved memory context", () => {
+  const app = loadMain();
+  app.run(`
+    settings.memory = { enabled: true, notes: ["Ferdi is fixing the Rem sprite animation", "Ferdi likes spicy ramen"] };
+    chatHistory = [{ role: "user", content: "The animation in my Rem project is still shifting", failed: false }];
+    foregroundActivity = { appName: "Visual Studio Code", processName: "Code", changedAt: Date.now() - 30000 };
+  `);
+  const context = app.run('conversationContextInstruction("A click reaction", {clickReaction:true})');
+  assert.match(context, /Visual Studio Code/);
+  assert.match(context, /Rem sprite animation/);
+  assert.match(context, /short, speakable Indonesian line/);
+  assert.doesNotMatch(context, /spicy ramen/);
+});
+
+test("a click milestone sends one short AI reply through the existing spoken pet-message path", async () => {
+  const app = loadMain();
+  app.run(`
+    settings = normalizeSettings({expressionMode:"clickOnly",assistant:{baseUrl:"https://chat.example/v1",model:"test"}});
+    getCharacterPack = () => ({states:{tsundere:{}}});
+    mainWindow = {isDestroyed:()=>false,webContents:{send(){}}};
+    globalThis.sentPetMessages = [];
+    sendPetMessage = (...args) => sentPetMessages.push(args);
+    requestAssistantReply = async (prompt, _controller, _progress, context) => {
+      globalThis.clickPrompt = prompt;
+      globalThis.clickTurnContext = context;
+      return {ok:true,reply:"Hehe, perhatianmu bikin Rem sedikit malu.",action:"tsundere"};
+    };
+  `);
+  const result = await app.run('reactToCharacterClick({sender:mainWindow.webContents}, "head", {milestone:true,clickCount:5})');
+  assert.equal(result.ok, true);
+  assert.doesNotMatch(app.run("clickPrompt"), /ke-5|lima kali|10 kali/i);
+  assert.equal(app.run("clickTurnContext.clickReaction"), true);
+  assert.equal(app.run("sentPetMessages.length"), 1);
+  assert.equal(app.run("sentPetMessages[0][0]"), "Hehe, perhatianmu bikin Rem sedikit malu.");
+  assert.equal(app.run("sentPetMessages[0][1]"), "tsundere");
+  assert.equal(app.run("sentPetMessages[0][2].speak"), true);
+});
+
 test("touches neither replace conversations or reminders nor enqueue responses", () => {
   const pet = loadPet();
   pet.run('handlePetMessage({source:"chat",text:"Answer",action:"review",streaming:true,speak:false})');
