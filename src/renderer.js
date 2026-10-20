@@ -11,6 +11,7 @@ const FALLBACK_CHARACTER = {
   name: "Default Character",
   spritePath: "../assets/characters/default/sprite.png",
   frame: { width: 768, height: 832 },
+  columns: 8,
   states: {
     idle: { row: 0, frames: 6, interval: 900 },
     runningRight: { row: 1, frames: 8, interval: 100 },
@@ -54,6 +55,7 @@ let frameIndex = 0;
 let animationTimer;
 let idleTimer;
 let temporaryToken = 0;
+let temporaryAnimationActive = false;
 let clickExpressionIndex = 0;
 let dragInterval;
 let dragStart = null;
@@ -80,6 +82,7 @@ let voiceLineLastInteraction = 0;
 let voiceLineRequestToken = 0;
 let chatRequestActive = false;
 let conversationAction = "idle";
+let musicModeEnabled = false;
 let queuedNotice = null;
 let bubbleVisible = false;
 let interactionReadyAt = 0;
@@ -91,14 +94,35 @@ function text(key, variables = {}) {
 
 function draw() {
   if (!spriteImage) return;
-  const current = character.states[state] || character.states.idle;
+  let current = character.states[state];
+  let activeState = state;
   const frame = character.frame;
-  const sx = (frameIndex % current.frames) * frame.width;
+  const validState = (candidate) => candidate
+    && Number.isInteger(candidate.row) && candidate.row >= 0
+    && Number.isInteger(candidate.frames) && candidate.frames > 0
+    && candidate.frames <= character.columns
+    && candidate.row * frame.height + frame.height <= spriteImage.naturalHeight
+    && candidate.frames * frame.width <= spriteImage.naturalWidth;
+  if (!validState(current)) {
+    activeState = "idle";
+    current = character.states.idle;
+  }
+  if (!validState(current)) return;
+  if (activeState !== state) {
+    state = activeState;
+    frameIndex = 0;
+  }
+  const sx = (Math.min(frameIndex, current.frames - 1) % current.frames) * frame.width;
   const sy = current.row * frame.height;
+  if (sx + frame.width > spriteImage.naturalWidth || sy + frame.height > spriteImage.naturalHeight) return;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(spriteImage, sx, sy, frame.width, frame.height, 0, 0, canvas.width, canvas.height);
+  const scale = Math.min(canvas.width / frame.width, canvas.height / frame.height);
+  const width = frame.width * scale;
+  const height = frame.height * scale;
+  ctx.drawImage(spriteImage, sx, sy, frame.width, frame.height,
+    (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
 }
 
 function applyPetLayout() {
@@ -112,12 +136,13 @@ function startAnimation() {
   window.clearInterval(animationTimer);
   const current = character.states[state] || character.states.idle;
   animationTimer = window.setInterval(() => {
-    if (settings.expressionMode === "clickOnly" && !dragStart) {
+    if (settings.expressionMode === "clickOnly" && !dragStart && !speechActive && !musicModeEnabled && !temporaryAnimationActive) {
       draw();
       return;
     }
-    // Play a conversational gesture once, then hold its expression while speaking.
-    frameIndex = conversationActive && state === conversationAction
+    // Keep the current expression animated while TTS is playing; hold its last
+    // frame after speech in automatic mode so the conversation remains readable.
+    frameIndex = conversationActive && state === conversationAction && !speechActive
       ? Math.min(frameIndex + 1, current.frames - 1)
       : (frameIndex + 1) % current.frames;
     draw();
@@ -126,7 +151,8 @@ function startAnimation() {
 }
 
 function setState(nextState) {
-  if (!character.states[nextState]) return;
+  if (musicModeEnabled && character.states.listening_music) nextState = "listening_music";
+  if (!character.states[nextState]) nextState = "idle";
   if (state === nextState) return;
   state = nextState;
   frameIndex = 0;
@@ -161,12 +187,26 @@ function playTemporary(nextState, duration = temporaryDuration(nextState)) {
   window.clearTimeout(idleTimer);
   temporaryToken += 1;
   const token = temporaryToken;
+  temporaryAnimationActive = true;
   setState(nextState);
   window.setTimeout(() => {
-    if (temporaryToken !== token || didDrag) return;
+    if (temporaryToken !== token) return;
+    temporaryAnimationActive = false;
+    if (didDrag) return;
     setState(conversationActive ? conversationAction : "idle");
     scheduleIdleBehavior();
   }, duration);
+}
+
+function applyExpressionRequest(request = {}) {
+  const requested = request.state;
+  if (requested === "listening_music") {
+    musicModeEnabled = request.enabled === true;
+    setState(musicModeEnabled ? "listening_music" : (conversationActive ? conversationAction : "idle"));
+    return;
+  }
+  if (!["tsundere", "angry"].includes(requested) || !character.states[requested]) return;
+  playTemporary(requested, requested === "angry" ? 2400 : 3000);
 }
 
 function nextClickState() {
@@ -218,6 +258,8 @@ function applyAppState(nextAppState = {}) {
   const modeChanged = nextAppState.settings?.expressionMode !== settings.expressionMode;
   const voiceLinesWereEnabled = settings.voiceLines?.enabled === true;
   const previousTts = JSON.stringify(settings.tts);
+  const previousMusicMode = musicModeEnabled;
+  musicModeEnabled = nextAppState.musicModeEnabled === true;
   character = nextCharacter;
   settings = {
     language: nextAppState.settings?.language || nextAppState.language || "system",
@@ -262,6 +304,7 @@ function applyAppState(nextAppState = {}) {
     interactionReadyAt = 0;
     interactionVariants = { head: 0, greet: 0, drop: 0 };
     clearPresentation();
+    temporaryAnimationActive = false;
   }
   else if (previousTts !== JSON.stringify(settings.tts)) {
     stopSpeech();
@@ -294,6 +337,11 @@ function applyAppState(nextAppState = {}) {
   }
 
   if (modeChanged) resetAfterSettingsChange();
+  else if (previousMusicMode !== musicModeEnabled) {
+    if (settings.expressionMode === "automatic" || musicModeEnabled) {
+      setState(musicModeEnabled ? "listening_music" : (conversationActive ? conversationAction : "idle"));
+    }
+  }
 }
 
 function resetAfterSettingsChange() {
@@ -302,9 +350,10 @@ function resetAfterSettingsChange() {
   clickOnlyReadyAt = 0;
   cancelDrag();
   temporaryToken += 1;
-  state = "idle";
+  temporaryAnimationActive = false;
+  state = musicModeEnabled && character.states.listening_music ? "listening_music" : "idle";
   frameIndex = 0;
-  if (settings.expressionMode === "clickOnly") {
+  if (settings.expressionMode === "clickOnly" && !musicModeEnabled) {
     window.clearTimeout(idleTimer);
     const currentIndex = character.staticExpressions.findIndex((expression) => expression.state === "idle" && expression.frame === 0);
     clickExpressionIndex = currentIndex >= 0 ? currentIndex + 1 : 0;
@@ -490,6 +539,7 @@ function dismissBubble() {
   conversationActive = false;
   conversationAction = "idle";
   temporaryToken += 1;
+  temporaryAnimationActive = false;
   if (settings.expressionMode === "automatic" && !dragStart) setState("idle");
   scheduleIdleBehavior();
   const pending = queuedNotice;
@@ -537,9 +587,9 @@ speechBubble.addEventListener("blur", () => { bubblePaused = false; hideBubbleLa
 speechBubble.addEventListener("click", () => window.desktopPet.openChatWindow());
 talkButton.addEventListener("click", () => { voiceLineLastInteraction = Date.now(); if (voiceLineAudio) stopVoiceLine(); scheduleIdleVoiceLine(); window.desktopPet.openQuickChatWindow(); });
 
-function finishSpeech(token, failed = false) {
+function finishSpeech(token, failed = false, reason = "") {
   if (token !== speechToken) return;
-  stopSpeech(failed ? "error" : "idle");
+  stopSpeech(failed ? "error" : "idle", reason);
   if (bubbleVisible) hideBubbleLater(Math.max(3000, bubbleRemaining));
 }
 
@@ -558,10 +608,10 @@ function chooseTtsVoice() {
     || voices[0];
 }
 
-function stopSpeech(status = "idle") {
+function stopSpeech(status = "idle", reason = "") {
   speechToken += 1;
   speechActive = false;
-  if (speechId !== null) window.desktopPet.speechStateChanged({ id: speechId, status });
+  if (speechId !== null) window.desktopPet.speechStateChanged({ id: speechId, status, ...(reason ? { reason } : {}) });
   speechId = null;
   window.clearTimeout(speechWatchdog);
   if (activeAudio) {
@@ -598,18 +648,30 @@ async function speakText(text) {
       if (index === chunks.length) { finishSpeech(token); return; }
       const chunk = chunks[index++];
       window.clearTimeout(speechWatchdog);
-      speechWatchdog = window.setTimeout(() => finishSpeech(token, true), 300000);
+      speechWatchdog = window.setTimeout(() => finishSpeech(token, true, "tts_timeout"), 300000);
       window.desktopPet.speechStateChanged({ id, status: "preparing" });
       try {
         if (external) {
           const result = await window.desktopPet.synthesizeSpeech({ id, text: chunk });
           if (token !== speechToken) return;
-          if (!result?.ok || !result.audioDataUrl) { finishSpeech(token, !result?.cancelled); return; }
-          activeAudio = new Audio(result.audioDataUrl);
-          activeAudio.volume = settings.tts.volume;
+          if (!result?.ok || !result.audioDataUrl) {
+            const error = String(result?.error || "");
+            const reason = result?.cancelled ? "" : /configuration_required|missing_tts_endpoint/.test(error)
+              ? "voice_not_configured" : /timeout/.test(error) ? "tts_timeout" : "tts_request_failed";
+            finishSpeech(token, !result?.cancelled, reason);
+            return;
+          }
+          try {
+            activeAudio = new Audio(result.audioDataUrl);
+            activeAudio.volume = settings.tts.volume;
+          } catch {
+            finishSpeech(token, true, "audio_creation_failed");
+            return;
+          }
           activeAudio.onended = playNext;
-          activeAudio.onerror = () => finishSpeech(token, true);
-          await activeAudio.play();
+          activeAudio.onerror = () => finishSpeech(token, true, "audio_playback_failed");
+          try { await activeAudio.play(); }
+          catch { finishSpeech(token, true, "audio_playback_failed"); return; }
           if (token === speechToken) window.desktopPet.speechStateChanged({ id, status: "playing" });
         } else {
           if (!("speechSynthesis" in window)) { finishSpeech(token, true); return; }
@@ -623,14 +685,14 @@ async function speakText(text) {
             if (token === speechToken) window.desktopPet.speechStateChanged({ id, status: "playing" });
           };
           utterance.onend = playNext;
-          utterance.onerror = () => finishSpeech(token, true);
+          utterance.onerror = () => finishSpeech(token, true, "audio_playback_failed");
           window.speechSynthesis.speak(utterance);
         }
-      } catch { finishSpeech(token, true); }
+      } catch { finishSpeech(token, true, external ? "tts_request_failed" : "audio_playback_failed"); }
     };
     await playNext();
   } catch {
-    finishSpeech(token, true);
+    finishSpeech(token, true, "audio_playback_failed");
   }
 }
 
@@ -724,6 +786,7 @@ window.desktopPet.onSpeechStopped((generation) => {
   stopSpeech();
   if (bubbleVisible) hideBubbleLater(Math.max(3000, bubbleRemaining));
 });
+window.desktopPet.onExpressionRequested?.(applyExpressionRequest);
 
 function handlePetMessage(message = {}) {
   if (message.clear) {
@@ -750,13 +813,14 @@ function handlePetMessage(message = {}) {
     if (action && character.states[action]) conversationAction = action;
     window.clearTimeout(idleTimer);
     temporaryToken += 1;
+    temporaryAnimationActive = false;
   }
   stopSpeech();
   showBubble(bubbleText, message.duration);
   if (typeof message !== "object" || message.speak !== false) {
     speakText(text);
   }
-  if (settings.expressionMode === "automatic" && !dragStart) {
+  if ((settings.expressionMode === "automatic" || speechActive) && !dragStart) {
     if (isChat) setState(conversationAction);
     else if (action && character.states[action]) playTemporary(action, Math.max(temporaryDuration(action), 1200));
   }

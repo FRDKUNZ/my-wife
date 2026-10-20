@@ -64,6 +64,11 @@ contextBridge.exposeInMainWorld("desktopPet", {
     ipcRenderer.on("app-state-updated", listener);
     return () => ipcRenderer.off("app-state-updated", listener);
   },
+  onExpressionRequested: (callback) => {
+    const listener = (_event, request) => callback(request);
+    ipcRenderer.on("expression-requested", listener);
+    return () => ipcRenderer.off("expression-requested", listener);
+  },
   onPetMessage: (callback) => {
     const listener = (_event, message) => callback(message);
     ipcRenderer.on("pet-message", listener);

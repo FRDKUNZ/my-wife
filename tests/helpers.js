@@ -13,6 +13,7 @@ function loadMain(overrides = {}) {
         app: {
           whenReady: () => ({ then() {} }), on() {}, getLocale: () => "en-US",
           getPath: () => "test-user-data",
+          getAppPath: () => path.join(sourceDir, ".."),
         },
         safeStorage: {
           isEncryptionAvailable: () => true,

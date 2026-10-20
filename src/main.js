@@ -128,6 +128,7 @@ let autonomousPauseUntil = 0;
 let autonomousLastSpokeAt = 0;
 let autonomousBusy = false;
 let autonomousRequestController = null;
+let musicModeEnabled = false;
 let voiceLinePlaying = false;
 let lastUserActivityAt = Date.now();
 const autonomousRecentOpeners = [];
@@ -139,6 +140,7 @@ let foregroundInputIdleMs = null;
 let foregroundInputReportAt = 0;
 let characterSessions = {};
 let voiceError = false;
+let voiceFailureReason = "";
 let speechGeneration = 0;
 let speechSequence = 0;
 let speechSession = null;
@@ -392,6 +394,7 @@ function publicVoiceLineSettings() {
 function appState() {
   return {
     speechGeneration,
+    musicModeEnabled,
     language: settings.language,
     resolvedLanguage: activeLanguage(),
     settings: publicSettings(),
@@ -1461,6 +1464,7 @@ function chatState() {
     busy: Boolean(chatRequest),
     pending: chatRequest ? { content: chatRequest.text, createdAt: chatRequest.createdAt, reply: chatRequest.reply || "" } : null,
     voiceError,
+    voiceFailureReason,
     voice: {
       status: speechSession?.status || "idle",
       enabled: settings.tts.enabled && settings.tts.provider !== "none",
@@ -1789,6 +1793,7 @@ async function sendChatMessage(_event, rawText, context) {
   const request = { text, createdAt: Date.now(), revision: chatRevision, controller: new AbortController() };
   chatRequest = request;
   voiceError = false;
+  voiceFailureReason = "";
   broadcastChatState();
 
   sendPetMessage(t("pet.thinking"), pickAvailableAction(["review", "idle"]), { source: "chat", speak: false, streaming: true });
@@ -1989,8 +1994,8 @@ function scheduleAutonomousConversation(delayOverride = null) {
   autonomousTimer = setTimeout(runAutonomousConversation, delay);
 }
 
-function autonomousRetryDelay() {
-  return Math.max(120, Number(settings.autonomousConversation?.minIntervalSeconds) || 120) * 1000;
+function autonomousFailureRetryDelay() {
+  return Math.max(300, Number(settings.autonomousConversation?.minIntervalSeconds) || 120) * 1000;
 }
 
 async function runAutonomousConversation() {
@@ -2023,13 +2028,17 @@ async function runAutonomousConversation() {
     recent,
     "Jika memilih SPEAK, keluarkan maksimal dua kalimat dan hanya informasi yang diketahui. Jangan tulis JSON atau penjelasan alasan.",
   ].join("\n");
+  const requestController = autonomousRequestController;
   try {
-    const result = await requestAssistantReply(openerPrompt, autonomousRequestController);
+    const result = await requestAssistantReply(openerPrompt, requestController);
     autonomousBusy = false;
-    autonomousRequestController = null;
+    if (autonomousRequestController === requestController) autonomousRequestController = null;
     broadcastChatState();
     if (!result.ok) {
-      scheduleAutonomousConversation(autonomousRetryDelay());
+      console.warn("[autonomous] assistant request failed; retry scheduled");
+      scheduleAutonomousConversation(Date.now() < autonomousPauseUntil
+        ? autonomousPauseUntil - Date.now()
+        : autonomousFailureRetryDelay());
       return;
     }
     if (/^WAIT\s*$/i.test(result.reply || "")) {
@@ -2038,7 +2047,8 @@ async function runAutonomousConversation() {
     }
     const decision = /^SPEAK\s*:\s*([\s\S]+)$/i.exec(result.reply || "");
     if (!decision || !decision[1].trim()) {
-      scheduleAutonomousConversation(autonomousRetryDelay());
+      console.warn("[autonomous] response had no valid SPEAK/WAIT decision; retry scheduled");
+      scheduleAutonomousConversation(autonomousFailureRetryDelay());
       return;
     }
     if (!autonomousCanSpeak()) {
@@ -2055,10 +2065,11 @@ async function runAutonomousConversation() {
       source: "chat", speak: true, bubbleText: bubblePreview(spokenText),
     });
   } catch {
-    scheduleAutonomousConversation(autonomousRetryDelay());
+    console.warn("[autonomous] request failed; retry scheduled");
+    scheduleAutonomousConversation(autonomousFailureRetryDelay());
   } finally {
     autonomousBusy = false;
-    autonomousRequestController = null;
+    if (autonomousRequestController === requestController) autonomousRequestController = null;
     broadcastChatState();
     if (!autonomousTimer) scheduleAutonomousConversation();
   }
@@ -2280,6 +2291,7 @@ function stopVoice() {
   speechSession?.controller?.abort();
   speechSession = null;
   voiceError = false;
+  voiceFailureReason = "";
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("speech-stopped", speechGeneration);
   }
@@ -2293,6 +2305,7 @@ function beginSpeech(event, generation) {
   speechSession?.controller?.abort();
   speechSession = { id: ++speechSequence, status: "preparing", controller: null };
   voiceError = false;
+  voiceFailureReason = "";
   broadcastChatState();
   return speechSession.id;
 }
@@ -2304,6 +2317,10 @@ function speechStateChanged(event, change) {
     speechSession.controller?.abort();
     speechSession = null;
     voiceError = change.status === "error";
+    voiceFailureReason = voiceError && ["tts_request_failed", "tts_timeout", "audio_creation_failed", "audio_playback_failed", "voice_not_configured", "voice_disabled"].includes(change.reason)
+      ? change.reason
+      : "";
+    if (voiceError) console.warn(`[voice] ${voiceFailureReason || "speech_failed"}`);
   } else if (["preparing", "playing"].includes(change.status)) {
     speechSession.status = change.status;
   } else return;
@@ -2316,6 +2333,7 @@ function replaySpeech() {
     || !settings.tts.enabled || settings.tts.provider === "none") return chatState();
   speechSession = { id: ++speechSequence, status: "preparing", controller: null };
   voiceError = false;
+  voiceFailureReason = "";
   broadcastChatState();
   sendPetMessage(reply.content, "idle", { source: "chat" });
   return chatState();
@@ -2397,7 +2415,27 @@ function showContextMenu() {
     click: () => updateSettings({ language: option.value }),
   }));
 
+  const chooseExpression = (state, enabled = true) => {
+    const pack = getCharacterPack();
+    if (!pack?.states?.[state] || !mainWindow || mainWindow.isDestroyed()) return;
+    if (state === "listening_music") musicModeEnabled = enabled;
+    mainWindow.webContents.send("expression-requested", { state, enabled });
+  };
+
   const menu = Menu.buildFromTemplate([
+    {
+      label: "Animasi Rem",
+      submenu: [
+        { label: "Tsundere", click: () => chooseExpression("tsundere") },
+        { label: "Marah", click: () => chooseExpression("angry") },
+        {
+          label: "Mendengarkan musik",
+          type: "checkbox",
+          checked: musicModeEnabled,
+          click: (item) => chooseExpression("listening_music", item.checked),
+        },
+      ],
+    },
     {
       label: t("menu.character"),
       enabled: characterItems.length > 0,

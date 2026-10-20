@@ -21,7 +21,7 @@ function loadPet(api = {}) {
     getContext: () => ({ clearRect() {}, drawImage: (image) => draws.push(image.src) }),
   };
   class Image {
-    constructor() { this.events = {}; images.push(this); }
+    constructor() { this.events = {}; this.naturalWidth = 6144; this.naturalHeight = 6656; images.push(this); }
     addEventListener(name, handler) { this.events[name] = handler; }
   }
   class Audio {

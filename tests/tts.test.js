@@ -3,12 +3,12 @@ const assert = require("node:assert/strict");
 const { loadMain } = require("./helpers");
 const { fishSpeechStyle } = require("../src/fish-speech-style");
 
-test("Fish speech style maps Indonesian lines to restrained supported directions", () => {
-  assert.equal(fishSpeechStyle("Selamat pagi, Ferdi!").text, "[warm] Selamat pagi, Ferdi!");
-  assert.equal(fishSpeechStyle("Wkwk, itu lucu banget!").text, "[chuckle] Wkwk, itu lucu banget!");
-  assert.equal(fishSpeechStyle("Kamu capek hari ini?").text, "[reassuring] Kamu capek hari ini?");
-  assert.equal(fishSpeechStyle("Sudah makan?").text, "[warm] Sudah makan?");
-  assert.equal(fishSpeechStyle("Istirahatlah malam ini.").text, "[near-whisper] Istirahatlah malam ini.");
+test("Fish speech text keeps natural wording without unverified spoken emotion tags", () => {
+  assert.equal(fishSpeechStyle("Selamat pagi, Ferdi!").text, "Selamat pagi, Ferdi!");
+  assert.equal(fishSpeechStyle("Wkwk, itu lucu banget!").text, "Wkwk, itu lucu banget!");
+  assert.equal(fishSpeechStyle("Kamu capek hari ini?").text, "Kamu capek hari ini?");
+  assert.equal(fishSpeechStyle("Sudah   makan?").text, "Sudah makan?");
+  assert.equal(fishSpeechStyle("Istirahatlah malam ini.").text, "Istirahatlah malam ini.");
 });
 
 test("voice URL download shares the synthesis timeout without forwarding credentials", async () => {
@@ -55,7 +55,7 @@ test("Fish Audio uses the documented REST request and returns MP3 audio", async 
   assert.equal(request.options.headers.Authorization, "Bearer secret-key");
   assert.equal(request.options.headers.model, "s2.1-pro-free");
   assert.deepEqual(JSON.parse(request.options.body), {
-    text: "[warm] Halo Ferdi", reference_id: "voice-id", temperature: 0.78, top_p: 0.78,
+    text: "Halo Ferdi", reference_id: "voice-id", temperature: 0.78, top_p: 0.78,
     prosody: { speed: 0.96, volume: 0, normalize_loudness: true }, chunk_length: 220,
     condition_on_previous_chunks: true, latency: "normal", format: "mp3",
   });

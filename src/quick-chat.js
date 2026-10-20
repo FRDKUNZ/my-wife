@@ -20,6 +20,7 @@ let characterName = "Desktop Pet";
 let replyStarted = false;
 let history = [];
 let voiceError = false;
+let voiceFailureReason = "";
 let receivedState = false;
 
 function text(key, variables = {}) {
@@ -41,7 +42,8 @@ function applyTranslations() {
   retryButton.hidden = !history.at(-1)?.failed || sending || remoteBusy;
   input.setAttribute("aria-label", text("quick.placeholder"));
   setStatus(sending || remoteBusy ? text(replyStarted ? "quick.responding" : "quick.waiting")
-    : history.at(-1)?.failed ? text("quick.replyFailed") : voiceError ? text("tts.playbackFailed") : text("quick.idle"));
+    : history.at(-1)?.failed ? text("quick.replyFailed") : voiceError
+      ? `${text("tts.playbackFailed")}${voiceFailureReason ? ` (${voiceFailureReason})` : ""}` : text("quick.idle"));
 }
 
 function setStatus(text) {
@@ -121,6 +123,7 @@ function applyChatState(state = {}) {
   remoteBusy = state.busy === true;
   history = Array.isArray(state.history) ? state.history : history;
   voiceError = state.voiceError === true;
+  voiceFailureReason = /^[a-z_]+$/.test(state.voiceFailureReason || "") ? state.voiceFailureReason : "";
   characterName = state.config?.persona?.name || state.character?.name || characterName;
   replyStarted = Boolean(state.pending?.reply);
   sendButton.disabled = sending || remoteBusy;

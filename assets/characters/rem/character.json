@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "id": "rem",
   "name": "Rem",
-  "description": "Rem character pack using the supplied 8×8 spritesheet.",
-  "sprite": "sprite.png",
+  "description": "Rem character pack with verified source frames and new expressions.",
+  "sprite": "sprite-rem-extended.png",
   "preview": "sprite.png",
   "frame": {
     "width": 768,
@@ -18,7 +18,10 @@
     "jumping": { "row": 4, "frames": 5, "interval": 180 },
     "failed": { "row": 5, "frames": 8, "interval": 220 },
     "running": { "row": 6, "frames": 6, "interval": 120 },
-    "review": { "row": 7, "frames": 6, "interval": 500 }
+    "review": { "row": 7, "frames": 6, "interval": 500 },
+    "tsundere": { "row": 8, "frames": 8, "interval": 360 },
+    "angry": { "row": 9, "frames": 8, "interval": 280 },
+    "listening_music": { "row": 10, "frames": 8, "interval": 420 }
   },
   "automaticActions": ["review", "waving", "jumping"],
   "clickActions": ["waving", "review", "jumping", "failed"],

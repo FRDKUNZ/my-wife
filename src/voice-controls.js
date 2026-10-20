@@ -19,7 +19,10 @@
     button.textContent = t(active ? "voice.stop" : "voice.replay");
     button.title = t(active ? "voice.stop" : "voice.replayTitle");
     button.disabled = pending || (!active && !voice.canReplay);
-    status.textContent = t(active ? `voice.${voice.status}` : state.voiceError ? "voice.failed" : "voice.ready");
+    const failure = state.voiceError && /^[a-z_]+$/.test(state.voiceFailureReason || "")
+      ? ` (${state.voiceFailureReason})` : "";
+    status.textContent = active ? t(`voice.${voice.status}`)
+      : state.voiceError ? `${t("voice.failed")}${failure}` : t("voice.ready");
     if (wasNearBottom) messages.scrollTop = messages.scrollHeight;
   }
 

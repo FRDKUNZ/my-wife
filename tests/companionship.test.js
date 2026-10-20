@@ -75,6 +75,21 @@ test("synthesis and playback both hold the bubble until audio ends", async () =>
   assert.equal(pet.run("bubbleVisible"), false);
 });
 
+test("the AI expression keeps animating throughout TTS, including click-only mode", () => {
+  const pet = loadPet({ synthesizeSpeech: () => new Promise(() => {}) });
+  pet.run('settings.tts = {enabled:true,provider:"custom"}; handlePetMessage({source:"chat",text:"Reply",action:"review"})');
+  const tick = [...pet.intervals.values()][0];
+  assert.equal(pet.run("speechActive"), true);
+  for (let i = 0; i < 7; i++) tick();
+  assert.equal(pet.run("frameIndex"), 1);
+  pet.run('settings.expressionMode = "clickOnly"');
+  tick();
+  assert.equal(pet.run("frameIndex"), 2);
+  pet.run("stopSpeech(); frameIndex=4");
+  tick();
+  assert.equal(pet.run("frameIndex"), 4);
+});
+
 test("voice errors preserve the text reply and release the presentation hold", async () => {
   let errors = 0;
   const pet = loadPet({ synthesizeSpeech: async () => ({ ok: false }), speechStateChanged: ({ status }) => { if (status === "error") errors++; } });

@@ -42,6 +42,46 @@ test("click-only mode advances on the first click and ignores automatic reaction
   assert.equal(pet.run("frameIndex"), 1);
 });
 
+test("music mode overrides chat expressions and restores the active expression when disabled", async () => {
+  const pet = loadPet();
+  pet.run(`character.states = {
+    ...FALLBACK_CHARACTER.states,
+    tsundere: { row: 8, frames: 8, interval: 240 },
+    angry: { row: 9, frames: 8, interval: 220 },
+    listening_music: { row: 10, frames: 8, interval: 260 },
+  }`);
+  pet.run('applyAppState({musicModeEnabled:true,activeCharacter:{...FALLBACK_CHARACTER,states:character.states},settings:{expressionMode:"automatic"}})');
+  pet.images.at(-1).naturalHeight = 11 * 832;
+  pet.images.at(-1).events.load();
+  await Promise.resolve();
+  assert.equal(pet.run("state"), "listening_music");
+  pet.run('handlePetMessage({text:"Pujian",action:"tsundere",source:"chat",speak:false})');
+  assert.equal(pet.run("state"), "listening_music");
+  pet.run('applyAppState({musicModeEnabled:false,settings:{expressionMode:"automatic"}})');
+  assert.equal(pet.run("state"), "tsundere");
+});
+
+test("new Rem expressions stay inside their mapped rows and unknown states fall back to idle", () => {
+  const pet = loadPet();
+  pet.run(`character = {...character, frame:{width:768,height:832}, columns:8, states:{
+    ...character.states,
+    tsundere:{row:8,frames:8,interval:360},
+    angry:{row:9,frames:8,interval:280},
+    listening_music:{row:10,frames:8,interval:420},
+  }}; spriteImage={naturalWidth:6144,naturalHeight:9152};`);
+  pet.run('setState("tsundere")');
+  assert.equal(pet.run("state"), "tsundere");
+  [...pet.intervals.values()][0]();
+  assert.equal(pet.run("frameIndex"), 1);
+  pet.run('setState("angry")');
+  assert.equal(pet.run("state"), "angry");
+  pet.run('musicModeEnabled=true; setState("angry")');
+  assert.equal(pet.run("state"), "listening_music");
+  pet.run('musicModeEnabled=false; setState("not-a-state")');
+  assert.equal(pet.run("state"), "idle");
+  assert.equal(pet.intervals.size, 1);
+});
+
 test("switching expression modes invalidates temporary animation callbacks", () => {
   const pet = loadPet();
   pet.run('playTemporary("waving")');

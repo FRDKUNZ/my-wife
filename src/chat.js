@@ -34,6 +34,7 @@ let chatRevision = 0;
 let sendToken = 0;
 let activeLanguage = "zh-CN";
 let voiceError = false;
+let voiceFailureReason = "";
 let renderedHistoryKey = "";
 let renderedRows = [];
 let receivedState = false;
@@ -75,7 +76,7 @@ function isLlmReady() {
 }
 
 function statusText() {
-  if (voiceError) return text("tts.playbackFailed");
+  if (voiceError) return `${text("tts.playbackFailed")}${voiceFailureReason ? ` (${voiceFailureReason})` : ""}`;
   if (!isLlmReady()) return text("chat.notConfigured");
   if (history.at(-1)?.failed) return text("chat.replyFailed");
   return text("chat.configured");
@@ -157,6 +158,7 @@ function applyChatState(state = {}) {
   remoteBusy = state.busy === true;
   pendingMessage = state.pending || null;
   voiceError = state.voiceError === true;
+  voiceFailureReason = /^[a-z_]+$/.test(state.voiceFailureReason || "") ? state.voiceFailureReason : "";
   sendButton.disabled = sending || remoteBusy;
   sendButton.hidden = sending || remoteBusy;
   stopButton.hidden = !(sending || remoteBusy);
