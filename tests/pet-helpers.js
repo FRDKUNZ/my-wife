@@ -9,6 +9,7 @@ function loadPet(api = {}) {
   const durations = new Map();
   const images = [];
   const draws = [];
+  const drawCalls = [];
   const audio = [];
   const events = {};
   let timerId = 0;
@@ -18,7 +19,7 @@ function loadPet(api = {}) {
     width: 768, height: 832, classList: { add() {}, remove() {} },
     getBoundingClientRect: () => ({ top: 0, left: 0, width: 192, height: 208 }),
     addEventListener(name, handler) { events[name] = handler; },
-    getContext: () => ({ clearRect() {}, drawImage: (image) => draws.push(image.src) }),
+    getContext: () => ({ clearRect() {}, drawImage: (...args) => { draws.push(args[0].src); drawCalls.push(args); } }),
   };
   class Image {
     constructor() { this.events = {}; this.naturalWidth = 6144; this.naturalHeight = 6656; images.push(this); }
@@ -47,7 +48,7 @@ function loadPet(api = {}) {
       documentElement: { style: { setProperty() {} } } },
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/renderer.js"), "utf8"), context);
-  return { context, intervals, timeouts, durations, images, draws, audio, bubble, events,
+  return { context, intervals, timeouts, durations, images, draws, drawCalls, audio, bubble, events,
     fireTimer(id) { const fn = timeouts.get(id); timeouts.delete(id); fn?.(); },
     run: (code) => vm.runInContext(code, context) };
 }

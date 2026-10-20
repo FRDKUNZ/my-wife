@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld("desktopPet", {
   getChatState: () => ipcRenderer.invoke("get-chat-state"),
   isChatActive: () => ipcRenderer.invoke("is-chat-active"),
   pauseAutonomousConversation: (minutes) => ipcRenderer.invoke("pause-autonomous-conversation", minutes),
+  testAutonomousConversation: () => ipcRenderer.invoke("test-autonomous-conversation"),
   reportVoiceLinePlayback: (playing) => ipcRenderer.send("voice-line-playback", playing),
   saveChatConfig: (patch) => ipcRenderer.invoke("save-chat-config", patch),
   testAssistantConnection: (patch) => ipcRenderer.invoke("test-assistant-connection", patch),
@@ -75,6 +76,7 @@ contextBridge.exposeInMainWorld("desktopPet", {
     return () => ipcRenderer.off("pet-message", listener);
   },
   recordInteraction: (kind) => ipcRenderer.send("record-interaction", kind),
+  reportUserActivity: () => ipcRenderer.send("report-user-activity"),
   showContextMenu: () => ipcRenderer.send("show-context-menu"),
   dragStart: () => ipcRenderer.send("drag-start"),
   dragMove: () => ipcRenderer.invoke("drag-move"),

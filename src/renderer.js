@@ -101,6 +101,9 @@ function draw() {
     && Number.isInteger(candidate.row) && candidate.row >= 0
     && Number.isInteger(candidate.frames) && candidate.frames > 0
     && candidate.frames <= character.columns
+    && (!candidate.frameIndices || (Array.isArray(candidate.frameIndices)
+      && candidate.frameIndices.length === candidate.frames
+      && candidate.frameIndices.every((index) => Number.isInteger(index) && index >= 0 && index < character.columns)))
     && candidate.row * frame.height + frame.height <= spriteImage.naturalHeight
     && candidate.frames * frame.width <= spriteImage.naturalWidth;
   if (!validState(current)) {
@@ -112,12 +115,28 @@ function draw() {
     state = activeState;
     frameIndex = 0;
   }
-  const sx = (Math.min(frameIndex, current.frames - 1) % current.frames) * frame.width;
+  const activeFrame = Math.min(frameIndex, current.frames - 1);
+  const sheetColumn = current.frameIndices?.[activeFrame] ?? activeFrame;
+  const sx = sheetColumn * frame.width;
   const sy = current.row * frame.height;
   if (sx + frame.width > spriteImage.naturalWidth || sy + frame.height > spriteImage.naturalHeight) return;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
+  const bounds = character.frameBounds?.[activeState]?.[activeFrame];
+  if (bounds && [bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isInteger)
+    && bounds.x >= 0 && bounds.y >= 0 && bounds.width > 0 && bounds.height > 0
+    && bounds.x + bounds.width <= frame.width && bounds.y + bounds.height <= frame.height) {
+    // The new Rem rows have transparent padding that varies from frame to
+    // frame. Crop to the measured alpha bounds, preserve aspect ratio, center
+    // the visible character, and anchor its feet to a shared baseline.
+    const drawHeight = canvas.height;
+    const drawWidth = bounds.width * drawHeight / bounds.height;
+    ctx.drawImage(spriteImage,
+      sx + bounds.x, sy + bounds.y, bounds.width, bounds.height,
+      (canvas.width - drawWidth) / 2, canvas.height - drawHeight, drawWidth, drawHeight);
+    return;
+  }
   const scale = Math.min(canvas.width / frame.width, canvas.height / frame.height);
   const width = frame.width * scale;
   const height = frame.height * scale;

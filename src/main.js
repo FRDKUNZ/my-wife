@@ -97,6 +97,8 @@ const DEFAULT_SETTINGS = {
     highTone: "更亲近、更信任，语气可以更温柔主动，但不要失去角色边界。",
   },
 };
+const MAX_AUTONOMOUS_INTERVAL_SECONDS = Number.MAX_SAFE_INTEGER / 1000;
+const MAX_TIMEOUT_DELAY_MS = 2_147_483_647;
 const DEFAULT_PROFILE = {
   mood: "calm",
   affection: 10,
@@ -124,6 +126,8 @@ let chatRevision = 0;
 const chatDrafts = new Map();
 let chatDraftVersion = 0;
 let autonomousTimer = null;
+let autonomousScheduleToken = 0;
+let autonomousRemainingDelayMs = 0;
 let autonomousPauseUntil = 0;
 let autonomousLastSpokeAt = 0;
 let autonomousBusy = false;
@@ -533,8 +537,8 @@ function normalizeSettings(nextSettings) {
   const rawAutonomous = { ...DEFAULT_SETTINGS.autonomousConversation, ...(nextSettings.autonomousConversation || {}) };
   const autonomousConversation = {
     enabled: rawAutonomous.enabled === true,
-    minIntervalSeconds: Math.round(clampNumber(rawAutonomous.minIntervalSeconds, 120, 3600, 120)),
-    maxIntervalSeconds: Math.round(clampNumber(rawAutonomous.maxIntervalSeconds, 120, 3600, 240)),
+    minIntervalSeconds: Math.round(clampNumber(rawAutonomous.minIntervalSeconds, 30, MAX_AUTONOMOUS_INTERVAL_SECONDS, 120)),
+    maxIntervalSeconds: Math.round(clampNumber(rawAutonomous.maxIntervalSeconds, 30, MAX_AUTONOMOUS_INTERVAL_SECONDS, 240)),
   };
   autonomousConversation.maxIntervalSeconds = Math.max(autonomousConversation.minIntervalSeconds, autonomousConversation.maxIntervalSeconds);
   const rawVoice = { ...DEFAULT_SETTINGS.voiceLines, ...(nextSettings.voiceLines || {}) };
@@ -1967,47 +1971,92 @@ function foregroundInputIsRecent() {
   return foregroundInputIdleMs !== null && Date.now() - foregroundInputReportAt < 5000 && foregroundInputIdleMs < 15000;
 }
 
-function autonomousCanSpeak() {
-  const chatFocused = [chatWindow, quickChatWindow, companionSettingsWindow]
+function autonomousCanSpeak({ manualTest = false } = {}) {
+  const chatFocused = [chatWindow, quickChatWindow]
     .some((window) => window && !window.isDestroyed() && window.isFocused());
   const hasDraft = [...chatDrafts.values()].some((value) => String(value || "").trim());
   return settings.autonomousConversation?.enabled === true
-    && Boolean(settings.assistant?.baseUrl && settings.assistant?.model)
     && mainWindow && !mainWindow.isDestroyed()
     && !app.isQuitting && !chatRequest && !autonomousBusy && !speechSession && !voiceLinePlaying
     && !chatFocused && !hasDraft && Date.now() >= autonomousPauseUntil
-    && !foregroundInputIsRecent()
-    && Date.now() - lastUserActivityAt >= 30_000
-    && Date.now() - autonomousLastSpokeAt >= 30_000;
+    && (manualTest || (!foregroundInputIsRecent()
+      && Date.now() - lastUserActivityAt >= 30_000
+      && Date.now() - autonomousLastSpokeAt >= 30_000));
 }
 
 function scheduleAutonomousConversation(delayOverride = null) {
   clearTimeout(autonomousTimer);
   autonomousTimer = null;
+  autonomousScheduleToken += 1;
+  const token = autonomousScheduleToken;
   if (!settings.autonomousConversation?.enabled || app.isQuitting) {
+    autonomousRemainingDelayMs = 0;
     autonomousRequestController?.abort();
     return;
   }
   const min = settings.autonomousConversation.minIntervalSeconds;
   const max = settings.autonomousConversation.maxIntervalSeconds;
-  const delay = delayOverride ?? (min + Math.random() * (max - min)) * 1000;
-  autonomousTimer = setTimeout(runAutonomousConversation, delay);
+  const delaySeconds = delayOverride === null
+    ? min + Math.random() * (max - min)
+    : Math.max(0, Number(delayOverride) / 1000);
+  autonomousRemainingDelayMs = Math.min(MAX_AUTONOMOUS_INTERVAL_SECONDS * 1000, delaySeconds * 1000);
+  const armNextTimerChunk = () => {
+    if (token !== autonomousScheduleToken || !settings.autonomousConversation?.enabled || app.isQuitting) return;
+    const chunk = Math.min(autonomousRemainingDelayMs, MAX_TIMEOUT_DELAY_MS);
+    autonomousRemainingDelayMs -= chunk;
+    autonomousTimer = setTimeout(() => {
+      if (token !== autonomousScheduleToken) return;
+      if (autonomousRemainingDelayMs > 0) {
+        armNextTimerChunk();
+        return;
+      }
+      autonomousTimer = null;
+      runAutonomousConversation();
+    }, chunk);
+  };
+  armNextTimerChunk();
 }
 
-function autonomousFailureRetryDelay() {
-  return Math.max(300, Number(settings.autonomousConversation?.minIntervalSeconds) || 120) * 1000;
+function autonomousFallbackText(appName = "") {
+  const options = appName ? [
+    `Aku lihat ${appName} sedang terbuka. Semangat ya, aku nemenin dari sini.`,
+    `Lagi pakai ${appName}, ya? Semoga semuanya berjalan lancar.`,
+    `Aku temani sebentar, ya. Semoga kegiatanmu bersama ${appName} terasa ringan.`,
+  ] : [
+    "Aku cuma mau menemanimu sebentar. Semoga harimu berjalan baik, ya.",
+    "Kirim sedikit semangat untukmu. Semoga ada hal menyenangkan yang terjadi hari ini.",
+    "Jangan lupa ambil jeda kecil kalau kamu membutuhkannya. Aku tetap di sini.",
+    "Semoga urusanmu hari ini terasa lebih ringan. Aku senang bisa menemanimu.",
+    "Aku mampir sebentar untuk bilang: semangat, ya. Pelan-pelan saja.",
+  ];
+  const recent = new Set(autonomousRecentOpeners.map((item) => item.toLowerCase()));
+  return options.find((item) => !recent.has(item.toLowerCase())) || options[0];
 }
 
-async function runAutonomousConversation() {
-  autonomousTimer = null;
-  if (!settings.autonomousConversation?.enabled || app.isQuitting) return;
-  if (!autonomousCanSpeak()) {
-    scheduleAutonomousConversation(30_000);
-    return;
+function deliverAutonomousText(spokenText, action = "idle") {
+  addChatMessage("assistant", spokenText);
+  autonomousRecentOpeners.push(spokenText.slice(0, 180));
+  if (autonomousRecentOpeners.length > 8) autonomousRecentOpeners.shift();
+  autonomousLastSpokeAt = Date.now();
+  broadcastChatState();
+  sendPetMessage(spokenText, action, {
+    source: "chat", speak: true, bubbleText: bubblePreview(spokenText),
+  });
+}
+
+async function runAutonomousConversation({ manualTest = false } = {}) {
+  if (!manualTest) autonomousTimer = null;
+  if (!settings.autonomousConversation?.enabled || app.isQuitting) {
+    return manualTest ? { ok: false, reason: "disabled" } : undefined;
   }
-  if (foregroundActivity && Date.now() - foregroundActivity.changedAt < 25_000) {
+  if (!autonomousCanSpeak({ manualTest })) {
+    if (manualTest) return { ok: false, reason: mainWindow && !mainWindow.isDestroyed() ? "busy" : "unavailable" };
+    scheduleAutonomousConversation(30_000);
+    return undefined;
+  }
+  if (!manualTest && foregroundActivity && Date.now() - foregroundActivity.changedAt < 25_000) {
     scheduleAutonomousConversation(15_000);
-    return;
+    return undefined;
   }
   autonomousBusy = true;
   autonomousRequestController = new AbortController();
@@ -2020,54 +2069,68 @@ async function runAutonomousConversation() {
     : "Tidak ada konteks aplikasi foreground yang cukup stabil; gunakan topik random bila ingin memulai obrolan.";
   const inputIdleSeconds = foregroundInputIdleMs === null ? null : Math.floor(foregroundInputIdleMs / 1000);
   const lastSpokeSeconds = autonomousLastSpokeAt ? Math.floor((Date.now() - autonomousLastSpokeAt) / 1000) : null;
+  const availableExpressions = Object.keys(getCharacterPack()?.states || { idle: {} })
+    .filter((name) => /^[a-zA-Z][a-zA-Z0-9]{0,40}$/.test(name));
+  const spontaneousAngles = [
+    "mulai dengan pengamatan kecil yang relevan, tanpa harus mengakhirinya dengan pertanyaan",
+    "sambungkan secara ringan dengan topik terakhir jika terasa alami",
+    "selipkan celetukan atau humor kecil yang lembut jika memang cocok",
+    "beri dukungan singkat yang terasa personal, tanpa terdengar seperti slogan",
+    "bagikan satu pikiran spontan dengan kalimat lisan yang sederhana",
+  ];
+  const spontaneousAngle = spontaneousAngles[Math.floor(Math.random() * spontaneousAngles.length)];
   const openerPrompt = [
-    "Tentukan dulu apakah Rem sebaiknya berbicara sekarang. Balas tepat 'WAIT' jika tidak ada alasan alami untuk menyela, pengguna mungkin fokus, atau obrolan akan terasa dipaksakan. Jika layak, balas 'SPEAK: ' diikuti satu ucapan singkat dalam bahasa Indonesia yang natural dan hangat.",
+    `Rem sudah dipastikan aman untuk menyela pada saat ini. Setiap kali permintaan ini diterima, Rem harus berbicara sekarang; jangan menjawab WAIT, menolak, atau memberi penjelasan. Mulai jawaban dengan satu marker ekspresi yang valid, lalu 'SPEAK: ' dan ucapan Rem. Ekspresi yang tersedia: ${availableExpressions.join(", ")}.`,
     `Konteks lokal: aplikasi Rem aktif dan siap; ${activityContext} Input keyboard/mouse terakhir sekitar ${inputIdleSeconds === null ? "tidak tersedia" : `${inputIdleSeconds} detik lalu`}. Waktu sejak ucapan proaktif sebelumnya: ${lastSpokeSeconds === null ? "belum pernah" : `${lastSpokeSeconds} detik`}.`,
-    "Jangan menyapa seolah Ferdi baru datang atau baru membuka aplikasi. Hindari pembuka 'hai/halo', menanyakan kabar atau kegiatan hari ini, dan komentar bahwa Ferdi diam kecuali konteks percakapan memang membuatnya relevan. Utamakan tindak lanjut topik sebelumnya, komentar ringan berdasarkan aplikasi yang stabil, cerita/candaan singkat, atau topik baru yang terasa spesifik. Tidak perlu berbicara pada setiap kesempatan; WAIT adalah pilihan baik jika tidak ada hal yang menarik untuk disampaikan. Nama aplikasi hanya menunjukkan aplikasi yang berada di depan; jangan menyimpulkan isi layar, aktivitas rinci, skor, ronde, kemenangan, lokasi, atau data lain yang tidak tersedia.",
-    "Hindari mengulang pembuka/topik berikut:",
+    "Bicaralah seperti Rem yang sedang berbagi pikiran spontan, bukan membacakan pengumuman. Gunakan bahasa Indonesia sehari-hari, ritme kalimat yang bervariasi, dan nada hangat yang sesuai isi. Sesekali boleh memakai 'eh', 'hmm', komentar kecil, candaan, atau potongan kalimat, tetapi jangan menjadikannya pola tetap. Tidak perlu selalu bertanya, menyapa, atau menyebut nama pengguna. Jangan terdengar formal, seperti customer service, terlalu puitis, atau terlalu bersemangat tanpa alasan.",
+    `Arah ringan untuk giliran ini: ${spontaneousAngle}. Ikuti hanya jika cocok dengan konteks; jangan menyebut instruksi ini.`,
+    "Pilih idle untuk sebagian besar obrolan. Gunakan tsundere hanya untuk pujian atau godaan ringan yang memang terasa malu-malu; gunakan ekspresi ceria/penasaran hanya jika keadaan mendukung; angry hanya jika konteks jelas menunjukkan kekesalan. Jangan pilih state yang tidak tercantum dan jangan menulis nama ekspresi sebagai kata-kata lisan.",
+    "Jangan menyapa seolah Ferdi baru datang atau baru membuka aplikasi. Utamakan tindak lanjut percakapan sebelumnya, komentar ringan tentang aplikasi yang stabil, cerita/candaan singkat, atau pengamatan kecil yang spesifik. Nama aplikasi hanya menunjukkan aplikasi foreground; jangan mengarang isi layar, aktivitas rinci, skor, ronde, kemenangan, lokasi, atau data lain yang tidak tersedia.",
+    "Jangan mengulang pembuka, topik, atau kalimat berikut:",
     recent,
-    "Jika memilih SPEAK, keluarkan maksimal dua kalimat dan hanya informasi yang diketahui. Jangan tulis JSON atau penjelasan alasan.",
+    "Buat satu sampai tiga kalimat pendek yang enak diucapkan dan umumnya di bawah 220 karakter. Output hanya dalam format [expression:state] SPEAK: ucapan Rem. Jangan tulis JSON, arahan suara, atau penjelasan alasan.",
   ].join("\n");
   const requestController = autonomousRequestController;
+  const requestTimeout = setTimeout(() => requestController.abort(), 20_000);
   try {
     const result = await requestAssistantReply(openerPrompt, requestController);
     autonomousBusy = false;
     if (autonomousRequestController === requestController) autonomousRequestController = null;
     broadcastChatState();
-    if (!result.ok) {
-      console.warn("[autonomous] assistant request failed; retry scheduled");
-      scheduleAutonomousConversation(Date.now() < autonomousPauseUntil
-        ? autonomousPauseUntil - Date.now()
-        : autonomousFailureRetryDelay());
-      return;
-    }
-    if (/^WAIT\s*$/i.test(result.reply || "")) {
-      scheduleAutonomousConversation();
-      return;
-    }
+    let spokenText = "";
+    let action = "idle";
+    if (!result.ok) console.warn("[autonomous] assistant request failed; using a local fallback line");
+    else if (/^WAIT\s*$/i.test(result.reply || "")) console.info("[autonomous] assistant returned WAIT; using a local fallback line");
     const decision = /^SPEAK\s*:\s*([\s\S]+)$/i.exec(result.reply || "");
-    if (!decision || !decision[1].trim()) {
-      console.warn("[autonomous] response had no valid SPEAK/WAIT decision; retry scheduled");
-      scheduleAutonomousConversation(autonomousFailureRetryDelay());
-      return;
+    if (result.ok && decision?.[1]?.trim()) {
+      spokenText = decision[1].trim().slice(0, 600);
+      action = result.action || "idle";
+    } else if (result.ok && result.reply && !/^WAIT\s*$/i.test(result.reply)) {
+      // Tolerate providers that omit the SPEAK prefix while still returning a
+      // usable natural-language response.
+      spokenText = result.reply.trim().slice(0, 600);
     }
-    if (!autonomousCanSpeak()) {
+    if (!spokenText) spokenText = autonomousFallbackText(stableActivity?.appName || "");
+    if (!autonomousCanSpeak({ manualTest })) {
       scheduleAutonomousConversation(30_000);
-      return;
+      return manualTest ? { ok: false, reason: "busy" } : undefined;
     }
-    const spokenText = decision[1].trim().slice(0, 600);
-    addChatMessage("assistant", spokenText);
-    autonomousRecentOpeners.push(spokenText.slice(0, 180));
-    if (autonomousRecentOpeners.length > 8) autonomousRecentOpeners.shift();
-    autonomousLastSpokeAt = Date.now();
-    broadcastChatState();
-    sendPetMessage(spokenText, result.action || "idle", {
-      source: "chat", speak: true, bubbleText: bubblePreview(spokenText),
-    });
+    deliverAutonomousText(spokenText, action);
+    return { ok: true, voiceEnabled: settings.tts.enabled && settings.tts.provider !== "none" };
   } catch {
-    console.warn("[autonomous] request failed; retry scheduled");
-    scheduleAutonomousConversation(autonomousFailureRetryDelay());
+    autonomousBusy = false;
+    if (autonomousRequestController === requestController) autonomousRequestController = null;
+    broadcastChatState();
+    if (autonomousCanSpeak({ manualTest })) {
+      console.warn("[autonomous] request failed; using a local fallback line");
+      deliverAutonomousText(autonomousFallbackText(stableActivity?.appName || ""));
+      return { ok: true, voiceEnabled: settings.tts.enabled && settings.tts.provider !== "none" };
+    } else {
+      scheduleAutonomousConversation(30_000);
+      return manualTest ? { ok: false, reason: "busy" } : undefined;
+    }
   } finally {
+    clearTimeout(requestTimeout);
     autonomousBusy = false;
     if (autonomousRequestController === requestController) autonomousRequestController = null;
     broadcastChatState();
@@ -2593,6 +2656,10 @@ app.whenReady().then(() => {
     || (quickChatWindow && !quickChatWindow.isDestroyed() && quickChatWindow.isFocused())
   ));
   ipcMain.handle("pause-autonomous-conversation", pauseAutonomousConversation);
+  ipcMain.handle("test-autonomous-conversation", (event) => {
+    if (event.sender !== companionSettingsWindow?.webContents) return { ok: false, reason: "forbidden" };
+    return runAutonomousConversation({ manualTest: true });
+  });
   ipcMain.on("voice-line-playback", (_event, playing) => { voiceLinePlaying = playing === true; });
   ipcMain.handle("save-chat-config", (_event, patch) => applyChatConfigPatch(patch));
   ipcMain.handle("test-assistant-connection", testAssistantConnection);
@@ -2613,6 +2680,12 @@ app.whenReady().then(() => {
   ipcMain.handle("synthesize-speech", synthesizeSpeech);
   ipcMain.on("set-settings", (_event, patch) => updateSettings(patch));
   ipcMain.on("record-interaction", (_event, kind) => { lastUserActivityAt = Date.now(); updateMoodFromInteraction(kind); });
+  ipcMain.on("report-user-activity", (event) => {
+    const appWindows = [mainWindow, chatWindow, quickChatWindow, companionSettingsWindow];
+    if (appWindows.some((window) => window && !window.isDestroyed() && window.webContents === event.sender)) {
+      lastUserActivityAt = Date.now();
+    }
+  });
   ipcMain.on("present-notification", (event, notice) => {
     if (event.sender !== mainWindow?.webContents || !Notification.isSupported()) return;
     const title = normalizeCompactText(notice?.title, 120);

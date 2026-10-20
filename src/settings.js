@@ -88,6 +88,8 @@ const idleIntervalMaxEl = document.querySelector("#idle-interval-max");
 const autonomousEnabledEl = document.querySelector("#autonomous-enabled");
 const autonomousMinEl = document.querySelector("#autonomous-min");
 const autonomousMaxEl = document.querySelector("#autonomous-max");
+const autonomousTestButton = document.querySelector("#autonomous-test");
+const autonomousTestStatus = document.querySelector("#autonomous-test-status");
 const launchAtStartupEl = document.querySelector("#launch-at-startup");
 const greetingOnStartupEl = document.querySelector("#greeting-on-startup");
 const greetingClickFallbackEl = document.querySelector("#greeting-click-fallback");
@@ -100,6 +102,7 @@ const nightStartEl = document.querySelector("#night-start");
 const nightEndEl = document.querySelector("#night-end");
 const voiceLineFolderEl = document.querySelector("#voice-line-folder");
 const splitterSegmentsEl = document.querySelector("#splitter-segments");
+let lastActivityReportAt = 0;
 let splitterSource = "";
 let splitterTimestamps = null;
 let splitterSession = "";
@@ -114,6 +117,17 @@ let importToken = null;
 let testAudio = null;
 let testGeneration = 0;
 const characterDrafts = new Map();
+
+function reportSettingsActivity() {
+  const now = Date.now();
+  if (now - lastActivityReportAt < 1000) return;
+  lastActivityReportAt = now;
+  window.desktopPet.reportUserActivity?.();
+}
+
+["pointerdown", "keydown", "input", "change"].forEach((eventName) => {
+  window.addEventListener(eventName, reportSettingsActivity, true);
+});
 
 function selectTab(name) {
   const changed = selectedTab !== name;
@@ -767,6 +781,39 @@ document.querySelector("#autonomous-pause").addEventListener("click", async () =
     const result = await window.desktopPet.pauseAutonomousConversation(30);
     status.textContent = result.ok ? "Paused for 30 minutes." : "Unable to pause.";
   } catch { status.textContent = "Unable to pause."; }
+});
+
+autonomousTestButton.addEventListener("click", async () => {
+  autonomousTestStatus.textContent = "";
+  if (!autonomousEnabledEl.checked) {
+    autonomousTestStatus.textContent = "Enable Autonomous Conversation, then save settings first.";
+    return;
+  }
+  if (changedFields().length) {
+    autonomousTestStatus.textContent = "Save your settings before running the test.";
+    return;
+  }
+  autonomousTestButton.disabled = true;
+  autonomousTestStatus.textContent = "Rem is preparing a test message…";
+  try {
+    const result = await window.desktopPet.testAutonomousConversation();
+    if (!result?.ok) {
+      const messages = {
+        busy: "A chat or voice is already active. Try again when it finishes.",
+        disabled: "Enable Autonomous Conversation and save settings first.",
+        unavailable: "The pet window is not ready. Try again in a moment.",
+      };
+      autonomousTestStatus.textContent = messages[result?.reason] || "The test could not be started.";
+    } else if (result.voiceEnabled) {
+      autonomousTestStatus.textContent = "Test message sent. Audio playback was requested.";
+    } else {
+      autonomousTestStatus.textContent = "Test message sent as text. Voice is disabled in TTS settings.";
+    }
+  } catch {
+    autonomousTestStatus.textContent = "The test failed. Check the AI and TTS settings.";
+  } finally {
+    autonomousTestButton.disabled = false;
+  }
 });
 
 async function saveConfig(includeEmptyKey = false) {

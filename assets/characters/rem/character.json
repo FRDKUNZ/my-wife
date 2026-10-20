@@ -19,9 +19,38 @@
     "failed": { "row": 5, "frames": 8, "interval": 220 },
     "running": { "row": 6, "frames": 6, "interval": 120 },
     "review": { "row": 7, "frames": 6, "interval": 500 },
-    "tsundere": { "row": 8, "frames": 8, "interval": 360 },
+    "tsundere": { "row": 8, "frames": 5, "frameIndices": [2, 3, 4, 5, 6], "interval": 360 },
     "angry": { "row": 9, "frames": 8, "interval": 280 },
     "listening_music": { "row": 10, "frames": 8, "interval": 420 }
+  },
+  "frameBounds": {
+    "tsundere": [
+      { "x": 239, "y": 1, "width": 343, "height": 815 },
+      { "x": 198, "y": 1, "width": 354, "height": 815 },
+      { "x": 169, "y": 0, "width": 342, "height": 815 },
+      { "x": 219, "y": 0, "width": 340, "height": 798 },
+      { "x": 189, "y": 0, "width": 359, "height": 798 }
+    ],
+    "angry": [
+      { "x": 190, "y": 0, "width": 347, "height": 816 },
+      { "x": 188, "y": 1, "width": 388, "height": 810 },
+      { "x": 212, "y": 4, "width": 370, "height": 816 },
+      { "x": 179, "y": 6, "width": 429, "height": 806 },
+      { "x": 175, "y": 4, "width": 370, "height": 816 },
+      { "x": 209, "y": 4, "width": 350, "height": 821 },
+      { "x": 189, "y": 3, "width": 349, "height": 817 },
+      { "x": 165, "y": 0, "width": 347, "height": 816 }
+    ],
+    "listening_music": [
+      { "x": 190, "y": 0, "width": 380, "height": 828 },
+      { "x": 168, "y": 3, "width": 404, "height": 822 },
+      { "x": 239, "y": 2, "width": 361, "height": 829 },
+      { "x": 186, "y": 19, "width": 338, "height": 806 },
+      { "x": 181, "y": 19, "width": 401, "height": 803 },
+      { "x": 199, "y": 12, "width": 388, "height": 812 },
+      { "x": 179, "y": 3, "width": 404, "height": 822 },
+      { "x": 165, "y": 19, "width": 380, "height": 813 }
+    ]
   },
   "automaticActions": ["review", "waving", "jumping"],
   "clickActions": ["waving", "review", "jumping", "failed"],

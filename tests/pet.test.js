@@ -82,6 +82,25 @@ test("new Rem expressions stay inside their mapped rows and unknown states fall 
   assert.equal(pet.intervals.size, 1);
 });
 
+test("new Rem frames are alpha-cropped, centered, and baseline-aligned at a consistent size", () => {
+  const pet = loadPet();
+  pet.run(`character = {...character, frame:{width:768,height:832}, columns:8, frameBounds:{
+    tsundere:[{x:239,y:1,width:343,height:815},{x:198,y:1,width:354,height:815}],
+  }, states:{...character.states, tsundere:{row:8,frames:2,frameIndices:[2,3],interval:360}}};
+    spriteImage={naturalWidth:6144,naturalHeight:9152,src:"rem.png"}; state="tsundere"`);
+  pet.run("frameIndex=0; draw()");
+  const first = pet.drawCalls.at(-1);
+  pet.run("frameIndex=1; draw()");
+  const second = pet.drawCalls.at(-1);
+  assert.deepEqual([...first.slice(1, 5)], [2 * 768 + 239, 8 * 832 + 1, 343, 815]);
+  assert.deepEqual([...second.slice(1, 5)], [3 * 768 + 198, 8 * 832 + 1, 354, 815]);
+  for (const call of [first, second]) {
+    assert.equal(call[5] + call[7] / 2, 768 / 2);
+    assert.equal(call[6] + call[8], 832);
+    assert.equal(call[8], 832);
+  }
+});
+
 test("switching expression modes invalidates temporary animation callbacks", () => {
   const pet = loadPet();
   pet.run('playTemporary("waving")');

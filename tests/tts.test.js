@@ -9,6 +9,9 @@ test("Fish speech text keeps natural wording without unverified spoken emotion t
   assert.equal(fishSpeechStyle("Kamu capek hari ini?").text, "Kamu capek hari ini?");
   assert.equal(fishSpeechStyle("Sudah   makan?").text, "Sudah makan?");
   assert.equal(fishSpeechStyle("Istirahatlah malam ini.").text, "Istirahatlah malam ini.");
+  assert.equal(fishSpeechStyle("Asyik, itu seru!").prosody.speed, 1.01);
+  assert.equal(fishSpeechStyle("Eh, kamu yakin?").prosody.speed, 0.99);
+  assert.equal(fishSpeechStyle("Hmm… mungkin nanti.").prosody.speed, 0.95);
 });
 
 test("voice URL download shares the synthesis timeout without forwarding credentials", async () => {
@@ -56,7 +59,7 @@ test("Fish Audio uses the documented REST request and returns MP3 audio", async 
   assert.equal(request.options.headers.model, "s2.1-pro-free");
   assert.deepEqual(JSON.parse(request.options.body), {
     text: "Halo Ferdi", reference_id: "voice-id", temperature: 0.78, top_p: 0.78,
-    prosody: { speed: 0.96, volume: 0, normalize_loudness: true }, chunk_length: 220,
+    prosody: { speed: 0.97, volume: 0, normalize_loudness: true }, chunk_length: 220,
     condition_on_previous_chunks: true, latency: "normal", format: "mp3",
   });
   assert.equal(result.audioDataUrl, "data:audio/mpeg;base64,AQID");
