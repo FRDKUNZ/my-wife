@@ -27,6 +27,27 @@ test("a stale sprite load cannot overwrite the selected character", async () => 
   assert.equal(pet.intervals.size, 1);
 });
 
+test("individual PNG action frames preload and render as a contextual conversation animation", async () => {
+  const pet = loadPet();
+  pet.run(`applyAppState({
+    activeCharacter: {
+      ...FALLBACK_CHARACTER,
+      id: "rem",
+      spritePath: "rem.png",
+      states: { ...FALLBACK_CHARACTER.states, tea: { frames: 2, interval: 100, loop: false, framePaths: ["tea-1.png", "tea-2.png"] } },
+    },
+    settings: { expressionMode: "automatic" },
+  })`);
+  for (const image of pet.images) image.events.load();
+  await Promise.resolve();
+  await Promise.resolve();
+  pet.run('handlePetMessage({text:"Mau minum teh?", action:"tea", source:"chat", speak:false})');
+  assert.equal(pet.run("state"), "tea");
+  assert.equal(pet.draws.at(-1), "tea-1.png");
+  [...pet.intervals.values()].at(-1)();
+  assert.equal(pet.draws.at(-1), "tea-2.png");
+});
+
 test("click-only mode advances on the first click and ignores automatic reactions", () => {
   const pet = loadPet();
   pet.run('settings.expressionMode = "clickOnly"; resetAfterSettingsChange()');

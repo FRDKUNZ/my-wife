@@ -308,6 +308,24 @@ function normalizeCharacterPack(rawPack, folderName) {
   };
   const columns = Number(rawPack.columns) || 8;
   const states = rawPack.states && typeof rawPack.states === "object" ? rawPack.states : {};
+  if (folderName === "rem") {
+    for (const [stateName, animationFolder, expectedFrames] of [["memberi_semangat", "memberi semangat", 6], ["tea", "tea", 8]]) {
+      const frameDirectory = path.join(CHARACTERS_DIR, animationFolder);
+      try {
+        const names = fs.readdirSync(frameDirectory).filter((name) => /^\d+\.png$/i.test(name))
+          .sort((left, right) => Number.parseInt(left, 10) - Number.parseInt(right, 10));
+        if (names.length !== expectedFrames || names.some((name, index) => name !== `${index + 1}.png`)) continue;
+        const framePaths = names.map((name) => {
+          const bytes = fs.readFileSync(path.join(frameDirectory, name));
+          if (bytes.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a") throw new Error("invalid PNG");
+          return publicAssetPath("characters", animationFolder, name);
+        });
+        states[stateName] = { frames: expectedFrames, interval: 200, loop: false, framePaths };
+      } catch {
+        console.warn(`[assets] Rem animation ${stateName} is incomplete; it will be unavailable`);
+      }
+    }
+  }
   const automaticActions = Array.isArray(rawPack.automaticActions)
     ? rawPack.automaticActions.filter((stateName) => states[stateName])
     : [];
@@ -1924,14 +1942,15 @@ async function sendChatMessage(_event, rawText, context) {
     }
     addChatMessage("user", text, !result.ok);
     const assistantMessage = addChatMessage("assistant", result.reply, !result.ok);
-    sendPetMessage(result.reply, result.action, {
+    const action = result.ok ? dialogueAnimationAction(result.reply, result.action) : result.action;
+    sendPetMessage(result.reply, action, {
       source: "chat",
       speak: result.ok,
       bubbleText: bubblePreview(result.reply),
     });
     if (result.ok) recordChatTimeProgress();
     updateMoodFromInteraction("chat");
-    return { ok: result.ok, action: result.action, message: assistantMessage,
+    return { ok: result.ok, action, message: assistantMessage,
       history: publicChatHistory(), revision: chatRevision };
   } finally {
     if (chatRequest === request) {
@@ -2217,6 +2236,18 @@ function deliverAutonomousText(spokenText, action = "idle") {
   });
 }
 
+function dialogueAnimationAction(spokenText, requestedAction = "idle") {
+  const states = getCharacterPack()?.states || {};
+  const text = String(spokenText || "");
+  if (states.memberi_semangat && /\b(?:semangat|kamu pasti bisa|aku percaya|jangan menyerah|mendukung|dukungan|support)\b/i.test(text)) {
+    return "memberi_semangat";
+  }
+  if (states.tea && /\b(?:mau|ingin|pengen|kubuatkan|kuambilkan|ambilkan|buatkan|minum dulu)\b.{0,35}\b(?:minum|teh|tea|kopi|susu|cokelat|air)\b|\b(?:minum|teh|tea|kopi|susu|cokelat|air)\b.{0,35}\b(?:mau|ingin|pengen|kubuatkan|kuambilkan|ambilkan|buatkan)\b/i.test(text)) {
+    return "tea";
+  }
+  return states[requestedAction] ? requestedAction : "idle";
+}
+
 async function runAutonomousConversation({ manualTest = false } = {}) {
   if (!manualTest) autonomousTimer = null;
   if (!settings.autonomousConversation?.enabled || app.isQuitting) {
@@ -2260,15 +2291,15 @@ async function runAutonomousConversation({ manualTest = false } = {}) {
   ];
   const spontaneousAngle = spontaneousAngles[Math.floor(Math.random() * spontaneousAngles.length)];
   const openerPrompt = [
-    `Rem sudah dipastikan aman untuk menyela pada saat ini. Setiap kali permintaan ini diterima, Rem harus berbicara sekarang; jangan menjawab WAIT, menolak, atau memberi penjelasan. Mulai jawaban dengan satu marker ekspresi yang valid, lalu 'SPEAK: ' dan ucapan Rem. Ekspresi yang tersedia: ${availableExpressions.join(", ")}.`,
+    `Rem sudah dipastikan aman untuk menyela pada saat ini. Setiap kali permintaan ini diterima, Rem harus berbicara sekarang; jangan menjawab WAIT, menolak, atau memberi penjelasan. Mulai jawaban dengan satu marker ekspresi yang valid, lalu langsung tulis ucapan Rem tanpa label atau awalan seperti SPEAK:. Ekspresi yang tersedia: ${availableExpressions.join(", ")}. Jika memberi semangat, pilih memberi_semangat. Jika menawarkan teh, kopi, air, atau minuman lain, pilih tea.`,
     `Konteks lokal: aplikasi Rem aktif dan siap; ${activityContext} Waktu perangkat saat ini: ${localDateTime} (${localTimeZone}). Gunakan waktu ini sebagai acuan jika menyebut pagi, siang, sore, malam, atau memberi sapaan berbasis waktu; jangan menebak waktu dari suasana atau konteks lain. Input keyboard/mouse terakhir sekitar ${inputIdleSeconds === null ? "tidak tersedia" : `${inputIdleSeconds} detik lalu`}. Waktu sejak ucapan proaktif sebelumnya: ${lastSpokeSeconds === null ? "belum pernah" : `${lastSpokeSeconds} detik`}.`,
     "Bicaralah seperti Rem yang sedang berbagi pikiran spontan, bukan membacakan pengumuman. Gunakan bahasa Indonesia sehari-hari, ritme kalimat yang bervariasi, dan nada hangat yang sesuai isi. Sesekali—jarang saja—Rem boleh menggoda Ferdi dengan frasa atau satu kalimat pendek dalam bahasa Jepang, lalu lanjutkan dalam bahasa Indonesia agar tetap terasa alami. Dalam momen mesra yang cocok, Rem boleh mengucapkan atau memainkan ciuman ringan dan manis secara fiksi, tanpa detail eksplisit. Sesekali boleh memakai 'eh', 'hmm', komentar kecil, candaan, atau potongan kalimat, tetapi jangan menjadikannya pola tetap. Tidak perlu selalu bertanya, menyapa, atau menyebut nama pengguna. Jangan terdengar formal, seperti customer service, terlalu puitis, atau terlalu bersemangat tanpa alasan.",
     `Arah ringan untuk giliran ini: ${spontaneousAngle}. Ikuti hanya jika cocok dengan konteks; jangan menyebut instruksi ini.`,
-    "Pilih idle untuk sebagian besar obrolan. Rem harus terdengar hangat dan perhatian; tsundere hanya sebagai bumbu sangat ringan dan sesekali untuk rasa malu yang memang cocok, bukan sebagai nada utama atau respons otomatis terhadap pujian. Gunakan ekspresi ceria/penasaran hanya jika keadaan mendukung; angry hanya jika konteks jelas menunjukkan kekesalan. Jangan pilih state yang tidak tercantum dan jangan menulis nama ekspresi sebagai kata-kata lisan.",
+    "Pilih idle untuk sebagian besar obrolan. Pilih memberi_semangat khusus ketika ucapan utama Rem menyemangati atau mendukung pengguna. Pilih tea saat Rem benar-benar menawarkan atau menyarankan minuman. Rem harus terdengar hangat dan perhatian; tsundere hanya sebagai bumbu sangat ringan dan sesekali untuk rasa malu yang memang cocok, bukan sebagai nada utama atau respons otomatis terhadap pujian. Gunakan ekspresi ceria/penasaran hanya jika keadaan mendukung; angry hanya jika konteks jelas menunjukkan kekesalan. Jangan pilih state yang tidak tercantum dan jangan menulis nama ekspresi sebagai kata-kata lisan.",
     "Jangan menyapa seolah Ferdi baru datang atau baru membuka aplikasi. Utamakan tindak lanjut percakapan sebelumnya, komentar ringan tentang aplikasi yang stabil, cerita/candaan singkat, atau pengamatan kecil yang spesifik. Nama aplikasi hanya menunjukkan aplikasi foreground; jangan mengarang isi layar, aktivitas rinci, skor, ronde, kemenangan, lokasi, atau data lain yang tidak tersedia.",
     "Jangan mengulang pembuka, topik, atau kalimat berikut:",
     recent,
-    "Buat satu sampai tiga kalimat pendek yang enak diucapkan dan umumnya di bawah 220 karakter. Output hanya dalam format [expression:state] SPEAK: ucapan Rem. Jangan tulis JSON, arahan suara, atau penjelasan alasan.",
+    "Buat satu sampai tiga kalimat pendek yang enak diucapkan dan umumnya di bawah 220 karakter. Output hanya dalam format [expression:state] ucapan Rem, tanpa kata SPEAK atau label lainnya. Jangan tulis JSON, arahan suara, atau penjelasan alasan.",
   ].join("\n");
   const requestController = autonomousRequestController;
   try {
@@ -2280,16 +2311,13 @@ async function runAutonomousConversation({ manualTest = false } = {}) {
     let action = "idle";
     if (!result.ok) console.warn(`[autonomous] assistant request failed (${result.failureCode || "unknown"}); using a local fallback line`);
     else if (/^WAIT\s*$/i.test(result.reply || "")) console.info("[autonomous] assistant returned WAIT; using a local fallback line");
-    const decision = /^SPEAK\s*:\s*([\s\S]+)$/i.exec(result.reply || "");
-    if (result.ok && decision?.[1]?.trim()) {
-      spokenText = decision[1].trim().slice(0, 600);
+    const cleanSpokenReply = String(result.reply || "").trim().replace(/^SPEAK\s*:\s*/i, "");
+    if (result.ok && cleanSpokenReply && !/^WAIT\s*$/i.test(cleanSpokenReply)) {
+      spokenText = cleanSpokenReply.slice(0, 600);
       action = result.action || "idle";
-    } else if (result.ok && result.reply && !/^WAIT\s*$/i.test(result.reply)) {
-      // Tolerate providers that omit the SPEAK prefix while still returning a
-      // usable natural-language response.
-      spokenText = result.reply.trim().slice(0, 600);
     }
     if (!spokenText) spokenText = autonomousFallbackText(stableActivity?.appName || "");
+    action = dialogueAnimationAction(spokenText, action);
     if (!autonomousCanSpeak({ manualTest })) {
       scheduleAutonomousConversation(30_000);
       return manualTest ? { ok: false, reason: "busy" } : undefined;

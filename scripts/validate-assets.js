@@ -66,6 +66,7 @@ function validateCharacter(folderName) {
 
 const characters = fs.readdirSync(charactersDir, { withFileTypes: true })
   .filter((entry) => entry.isDirectory())
+  .filter((entry) => fs.existsSync(path.join(charactersDir, entry.name, "character.json")))
   .map((entry) => entry.name);
 
 if (characters.length === 0) {

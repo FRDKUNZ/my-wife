@@ -39,7 +39,8 @@ test("autonomous conversation adds an assistant message and schedules a fresh ra
   assert.equal(app.run("sentPetMessages[0][2].source"), "chat");
   assert.equal(app.run("sentPetMessages[0][2].speak"), true);
   assert.equal(app.run("sentPetMessages[0][1]"), "waving");
-  assert.match(app.run("autonomousPrompt"), /\[expression:state\] SPEAK:/);
+  assert.match(app.run("autonomousPrompt"), /tanpa label atau awalan seperti SPEAK/);
+  assert.doesNotMatch(app.run("sentPetMessages[0][0]"), /^SPEAK\s*:/i);
   assert.equal(app.run("scheduledDelays.at(-1) >= 120000 && scheduledDelays.at(-1) <= 240000"), true);
 
   app.run("autonomousLastSpokeAt = Date.now() - 120000; autonomousTimer = null");
@@ -54,6 +55,15 @@ test("autonomous conversation adds an assistant message and schedules a fresh ra
   app.run("readSettings(); readCharacterSessions()");
   assert.equal(app.run("chatHistory.length"), 2);
   assert.equal(app.run("chatHistory.every((message) => message.role === 'assistant')"), true);
+});
+
+test("Rem registers the individual encouragement and tea frames and matches them to spoken intent", () => {
+  const app = readyMain();
+  app.run('settings.characterId = "rem"');
+  assert.equal(app.run('getCharacterPack().states.memberi_semangat.framePaths.length'), 6);
+  assert.equal(app.run('getCharacterPack().states.tea.framePaths.length'), 8);
+  assert.equal(app.run('dialogueAnimationAction("Semangat, Ferkun, kamu pasti bisa!")'), "memberi_semangat");
+  assert.equal(app.run('dialogueAnimationAction("Mau Rem ambilkan teh hangat?")'), "tea");
 });
 
 test("autonomous timer randomizes its delay and replaces the previous timer", () => {

@@ -50,6 +50,7 @@ let settings = {
 };
 let character = FALLBACK_CHARACTER;
 let spriteImage;
+let animationFrameImages = {};
 let state = "idle";
 let frameIndex = 0;
 let animationTimer;
@@ -103,14 +104,17 @@ function draw() {
   let activeState = state;
   const frame = character.frame;
   const validState = (candidate) => candidate
-    && Number.isInteger(candidate.row) && candidate.row >= 0
     && Number.isInteger(candidate.frames) && candidate.frames > 0
+    && (Array.isArray(candidate.framePaths)
+      ? candidate.framePaths.length === candidate.frames && animationFrameImages[state]?.length === candidate.frames
+      : Number.isInteger(candidate.row) && candidate.row >= 0)
     && candidate.frames <= character.columns
     && (!candidate.frameIndices || (Array.isArray(candidate.frameIndices)
       && candidate.frameIndices.length === candidate.frames
       && candidate.frameIndices.every((index) => Number.isInteger(index) && index >= 0 && index < character.columns)))
-    && candidate.row * frame.height + frame.height <= spriteImage.naturalHeight
-    && candidate.frames * frame.width <= spriteImage.naturalWidth;
+    && (Array.isArray(candidate.framePaths)
+      || (candidate.row * frame.height + frame.height <= spriteImage.naturalHeight
+        && candidate.frames * frame.width <= spriteImage.naturalWidth));
   if (!validState(current)) {
     activeState = "idle";
     current = character.states.idle;
@@ -121,6 +125,18 @@ function draw() {
     frameIndex = 0;
   }
   const activeFrame = Math.min(frameIndex, current.frames - 1);
+  if (Array.isArray(current.framePaths)) {
+    const image = animationFrameImages[activeState]?.[activeFrame];
+    if (!image) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    const scale = Math.min(canvas.width / image.naturalWidth, canvas.height / image.naturalHeight);
+    const width = image.naturalWidth * scale;
+    const height = image.naturalHeight * scale;
+    ctx.drawImage(image, (canvas.width - width) / 2, canvas.height - height, width, height);
+    return;
+  }
   const sheetColumn = current.frameIndices?.[activeFrame] ?? activeFrame;
   const sx = sheetColumn * frame.width;
   const sy = current.row * frame.height;
@@ -166,7 +182,7 @@ function startAnimation() {
     }
     // Keep the current expression animated while TTS is playing; hold its last
     // frame after speech in automatic mode so the conversation remains readable.
-    frameIndex = conversationActive && state === conversationAction && !speechActive
+    frameIndex = conversationActive && state === conversationAction && !speechActive && current.loop !== true
       ? Math.min(frameIndex + 1, current.frames - 1)
       : (frameIndex + 1) % current.frames;
     draw();
@@ -348,15 +364,30 @@ function applyAppState(nextAppState = {}) {
     window.clearTimeout(idleTimer);
     spriteImage = null;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    loadSprite(character.spritePath)
-      .then((image) => {
-        if (token !== spriteLoadToken) return;
-        spriteImage = image;
-        resetAfterSettingsChange();
-      })
-      .catch((error) => {
-        if (token === spriteLoadToken) console.error("Unable to load character sprite", error);
-      });
+    const framePaths = Object.values(character.states || {}).flatMap((descriptor) => descriptor.framePaths || []);
+    const uniqueFramePaths = [...new Set(framePaths)];
+    const applyLoadedSprites = (image, frameImages) => {
+      if (token !== spriteLoadToken) return;
+      spriteImage = image;
+      const frameImagesByPath = new Map(uniqueFramePaths.map((framePath, index) => [framePath, frameImages[index]]));
+      animationFrameImages = Object.fromEntries(Object.entries(character.states)
+        .filter(([, descriptor]) => Array.isArray(descriptor.framePaths))
+        .map(([name, descriptor]) => [name, descriptor.framePaths.map((framePath) => frameImagesByPath.get(framePath))]));
+      resetAfterSettingsChange();
+    };
+    if (uniqueFramePaths.length) {
+      Promise.all([loadSprite(character.spritePath), ...uniqueFramePaths.map((framePath) => loadSprite(framePath))])
+        .then(([image, ...frameImages]) => applyLoadedSprites(image, frameImages))
+        .catch((error) => {
+          if (token === spriteLoadToken) console.error("Unable to load character sprite", error);
+        });
+    } else {
+      loadSprite(character.spritePath)
+        .then((image) => applyLoadedSprites(image, []))
+        .catch((error) => {
+          if (token === spriteLoadToken) console.error("Unable to load character sprite", error);
+        });
+    }
     return;
   }
 
