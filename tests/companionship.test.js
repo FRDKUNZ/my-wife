@@ -186,6 +186,52 @@ test("relationship settings enter the prompt in all languages, independently of 
   }
 });
 
+test("Rem persona mode persists, changes the next system prompt, and leaves chat history intact", () => {
+  const app = loadMain();
+  app.run('settings = normalizeSettings({}); addChatMessage("user", "Keep this memory in the conversation");');
+  assert.equal(app.run("settings.personaMode"), "normal");
+  assert.match(app.run("personaInstruction()"), /ACTIVE PERSONA MODE: NORMAL/);
+  app.run('updateSettings({personaMode:"cegil"})');
+  assert.equal(app.run("settings.personaMode"), "cegil");
+  assert.match(app.run("personaInstruction()"), /ACTIVE PERSONA MODE: CEGIL/);
+  assert.match(app.run("personaInstruction()"), /Ferkun/);
+  assert.match(app.run('conversationContextInstruction("tap",{clickReaction:true})'), /Cegil mode remains active/);
+  assert.equal(app.run('chatHistory.some((item) => item.content === "Keep this memory in the conversation")'), true);
+  const saved = JSON.parse(app.writes.get(app.run("characterStatePath()")));
+  assert.equal(saved.settings.personaMode, "cegil");
+  app.run('updateSettings({personaMode:"invalid"})');
+  assert.equal(app.run("settings.personaMode"), "normal");
+});
+
+test("native context menu offers both persona modes and checks the selected mode", () => {
+  let lastTemplate;
+  const app = loadMain({ electron: { Menu: {
+    buildFromTemplate(template) { lastTemplate = template; return { popup() {} }; },
+  } } });
+  app.run('mainWindow = {}; updateSettings = (patch) => { settings = normalizeSettings({ ...settings, ...patch }); }; showContextMenu()');
+  let modeItems = lastTemplate.find((item) => item.label === "Mode").submenu;
+  assert.equal(modeItems.map((item) => item.label).join(","), "Mode Normal,Mode Cegil");
+  assert.equal(modeItems[0].checked, true);
+  modeItems[1].click();
+  app.run("showContextMenu()");
+  modeItems = lastTemplate.find((item) => item.label === "Mode").submenu;
+  assert.equal(modeItems[0].checked, false);
+  assert.equal(modeItems[1].checked, true);
+});
+
+test("Rem keeps its built-in Normal idle and exposes the separate Cegil sequence in numeric order", () => {
+  const app = loadMain();
+  const character = app.run('getCharacterPack("rem")');
+  const idle = character.cegilIdle;
+  assert.equal(character.states.idle.row, 0);
+  assert.equal(character.states.idle.streamed, undefined);
+  assert.equal(idle.streamed, true);
+  assert.equal(idle.frames, 122);
+  assert.equal(idle.interval, 1000 / 12);
+  assert.match(idle.framePaths[0], /rem%20cegil_00000\.png$/);
+  assert.match(idle.framePaths[121], /rem%20cegil_00121\.png$/);
+});
+
 test("preferred names and relationships remain isolated between characters", () => {
   const app = loadMain();
   app.run('settings = normalizeSettings({}); updateSettings({persona:{userName:"Alex",relationship:"partner"}}); updateSettings({characterId:"luna"})');

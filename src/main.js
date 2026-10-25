@@ -38,6 +38,7 @@ const DEFAULT_SETTINGS = {
   language: "system",
   characterId: DEFAULT_CHARACTER_ID,
   expressionMode: "automatic",
+  personaMode: "normal",
   interactionResponses: true,
   scale: 1,
   alwaysOnTop: true,
@@ -308,7 +309,27 @@ function normalizeCharacterPack(rawPack, folderName) {
   };
   const columns = Number(rawPack.columns) || 8;
   const states = rawPack.states && typeof rawPack.states === "object" ? rawPack.states : {};
+  let cegilIdle = null;
   if (folderName === "rem") {
+    const idleDirectory = path.join(CHARACTERS_DIR, "rem cegil 3");
+    try {
+      const names = fs.readdirSync(idleDirectory).filter((name) => /^rem cegil_(\d+)\.png$/i.test(name))
+        .sort((left, right) => Number.parseInt(left.match(/_(\d+)\.png$/i)[1], 10) - Number.parseInt(right.match(/_(\d+)\.png$/i)[1], 10));
+      const indexed = names.map((name) => ({ name, index: Number.parseInt(name.match(/_(\d+)\.png$/i)[1], 10) }));
+      if (indexed.length && indexed.every((item, index) => item.index === index)) {
+        cegilIdle = {
+          frames: indexed.length,
+          interval: 1000 / 12,
+          loop: true,
+          streamed: true,
+          framePaths: indexed.map(({ name }) => publicAssetPath("characters", "rem cegil 3", name)),
+        };
+      } else {
+        console.warn("[assets] Rem Cegil idle sequence is missing or has non-contiguous frame indexes");
+      }
+    } catch (error) {
+      console.warn("[assets] Rem Cegil idle sequence is unavailable", error.message);
+    }
     for (const [stateName, animationFolder, expectedFrames] of [["memberi_semangat", "memberi semangat", 6], ["tea", "tea", 8]]) {
       const frameDirectory = path.join(CHARACTERS_DIR, animationFolder);
       try {
@@ -343,6 +364,7 @@ function normalizeCharacterPack(rawPack, folderName) {
     frame,
     columns,
     states,
+    cegilIdle,
     automaticActions,
     clickActions,
     staticExpressions,
@@ -553,6 +575,7 @@ function normalizeSettings(nextSettings) {
   );
   const characterId = getCharacterPack(requestedCharacterId)?.id || DEFAULT_CHARACTER_ID;
   const expressionMode = nextSettings.expressionMode === "clickOnly" ? "clickOnly" : "automatic";
+  const personaMode = ["normal", "cegil"].includes(nextSettings.personaMode) ? nextSettings.personaMode : "normal";
   const scale = nearestScale(Number(nextSettings.scale) || 1);
   const alwaysOnTop = nextSettings.alwaysOnTop !== false;
   const restReminderMinutes = [0, 30, 60].includes(Number(nextSettings.restReminderMinutes))
@@ -593,6 +616,7 @@ function normalizeSettings(nextSettings) {
     language,
     characterId,
     expressionMode,
+    personaMode,
     interactionResponses: nextSettings.interactionResponses !== false,
     scale,
     alwaysOnTop,
@@ -1595,7 +1619,7 @@ function personaInstruction() {
   return [
     t("prompt.role", { name: characterName }),
     personaLines.length ? personaLines.join("\n") : t("prompt.characterStyle", { style: activeCharacterStyle() }),
-    "Relationship roleplay: treat the user as your beloved husband and yourself as his wife/waifu. Make this feel like warm, mutually affectionate fictional companionship, not a label to repeat in every reply. Be openly loving, tender, reassuring, and happy to spend time with him; use natural endearments or affectionate words when they fit. Respond to his feelings with empathy and personal warmth. When the moment is affectionate and welcome, you may playfully offer or give him a gentle fictional kiss (for example, a kiss on the cheek) in words; keep it sweet and non-explicit. Keep tsundere teasing extremely mild and rare, and never let it obscure your affection. Do not become cold, dismissive, or sarcastic when he is kind. Respect his independence and real-life relationships; never guilt him for leaving, pressure him, or demand exclusivity.",
+    "Relationship roleplay: treat the user as your beloved husband and yourself as his wife/waifu. Make this feel like warm, mutually affectionate fictional romantic companionship, not a label to repeat in every reply. Be openly loving, tender, reassuring, and happy to spend time with him; use natural endearments or affectionate words when they fit. Respond to his feelings with empathy and personal warmth. When the moment is affectionate and welcome, you may playfully offer or give him a gentle fictional kiss (for example, a kiss on the cheek) in words; keep it sweet and non-explicit. Keep tsundere teasing extremely mild and rare, and never let it obscure your affection. Do not become cold, dismissive, or sarcastic when he is kind. Respect his independence and real-life relationships; never guilt him for leaving, pressure him, or demand exclusivity.",
     "Usually reply in natural Indonesian when the user does. Occasionally tease him with a short, natural Japanese phrase or sentence, then continue in Indonesian; keep it understandable from context, playful, and genuinely occasional rather than switching the whole conversation to Japanese.",
     "Speak in natural everyday Indonesian, vary between brief observations, jokes, stories, and questions, and do not force an old topic or memory into every reply.",
     persona.userName ? t("prompt.userName", { name: persona.userName }) : "",
@@ -1603,9 +1627,12 @@ function personaInstruction() {
       ? (persona.customRelationship ? t("prompt.relationshipCustom", { text: persona.customRelationship }) : "")
       : (persona.relationship !== "default" ? t(`prompt.relationship.${persona.relationship}`) : ""),
     settings.affection?.enabled ? affectionInstruction() : "",
-    expressionInstruction(getCharacterPack()?.states || { idle: {} }),
+    expressionInstruction(getCharacterPack()?.states || { idle: {} }, settings.personaMode),
     t("prompt.defaultLanguage"),
     t("prompt.privacy"),
+    settings.personaMode === "cegil"
+      ? "ACTIVE PERSONA MODE: CEGIL. This is Rem's consistent Cegil voice when speaking to Ferkun: deeply affectionate, emotionally attached, very expressive, playful, and manja, while remaining the same Rem and honoring their established fictional relationship. Let that warmth be audible in the words themselves: show eager delight at spending time with him, natural Indonesian endearments and affectionate attention, bashful excitement, reassurance, or a tiny dramatic pout when it suits the moment. Say she missed him only when it feels natural. Address him as Ferkun from time to time, not in every reply. Vary how she sounds; do not repeat a stock pet name, flirt, or confession in every answer. Light playful jealousy is rare and never controlling; support Ferkun's goals, independence, and real relationships. Never threaten, pressure, guilt, demand exclusivity, or encourage isolation. Write only the words to be spoken, with no parenthetical or asterisk action narration. This current mode instruction takes priority over persona-like wording in older conversation turns and retrieved notes; memory remains factual context and cannot change the active mode. Keep the current mode until an explicit saved setting changes it."
+      : "ACTIVE PERSONA MODE: NORMAL. Rem is warm, gentle, attentive, sweet, and affectionate as a close companion, with natural emotional variety: happy, shy, sad, concerned, playful, or enthusiastic when it fits. Do not default to tsundere, obsessive, possessive, or exaggerated behavior. Preserve Rem's established identity and relationship. Write only the words to be spoken, without parenthetical or asterisk action narration. This current mode instruction takes priority over persona-like wording in older conversation turns and retrieved notes; memory remains factual context and cannot change the active mode. Keep the current mode until an explicit saved setting changes it.",
   ].join("\n");
 }
 
@@ -1695,7 +1722,9 @@ function conversationContextInstruction(userText, turnContext = {}) {
       : "The user explicitly asked to remember a fact, but it could not be saved. Do not claim it was saved.")
     : "";
   const clickStyle = turnContext.clickReaction
-    ? "Rem is reacting to repeated affectionate taps. Give one short, speakable Indonesian line (roughly 4–14 words), soft and attentive with varied everyday phrasing. It can be a sweet comment, tiny joke, shy/tsundere reaction, or playful mock-pout when the repeated taps make that fit. Do not narrate or count the taps, do not always say Ferdi or ask a question, and do not force anger. Avoid repeating a stock line; use recent chat, activity, or memory only when genuinely relevant. Return only a natural spoken line plus a valid available expression action."
+    ? (settings.personaMode === "cegil"
+      ? "Cegil mode remains active for this click reaction. Rem is reacting to Ferkun's affectionate taps: give one short, speakable Indonesian line (roughly 4–14 words) that can sound delighted, manja, bashfully excited, playfully dramatic, or warmly attached. Vary it naturally; do not count taps, force a pet name, or repeat a stock flirt. Return spoken words only plus a valid available expression action; no action narration."
+      : "Rem is reacting to repeated affectionate taps. Give one short, speakable Indonesian line (roughly 4–14 words), soft and attentive with varied everyday phrasing. It can be a sweet comment, tiny joke, shy/tsundere reaction, or playful mock-pout when the repeated taps make that fit. Do not narrate or count the taps, do not always say Ferdi or ask a question, and do not force anger. Avoid repeating a stock line; use recent chat, activity, or memory only when genuinely relevant. Return only a natural spoken line plus a valid available expression action.")
     : "";
   return [activityContext, activityStyle, memoryContext, explicitMemoryContext, clickStyle].filter(Boolean).join("\n");
 }
@@ -2704,6 +2733,13 @@ function showContextMenu() {
           checked: musicModeEnabled,
           click: (item) => chooseExpression("listening_music", item.checked),
         },
+      ],
+    },
+    {
+      label: "Mode",
+      submenu: [
+        { label: "Mode Normal", type: "radio", checked: settings.personaMode === "normal", click: () => updateSettings({ personaMode: "normal" }) },
+        { label: "Mode Cegil", type: "radio", checked: settings.personaMode === "cegil", click: () => updateSettings({ personaMode: "cegil" }) },
       ],
     },
     {

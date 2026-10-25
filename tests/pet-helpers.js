@@ -11,6 +11,7 @@ function loadPet(api = {}) {
   const draws = [];
   const drawCalls = [];
   const audio = [];
+  const animationFrames = new Map();
   const events = {};
   let timerId = 0;
   const bubble = { textContent: "", events: {}, addEventListener(name, fn) { this.events[name] = fn; }, classList: { add() {}, remove() {} } };
@@ -24,6 +25,7 @@ function loadPet(api = {}) {
   class Image {
     constructor() { this.events = {}; this.naturalWidth = 6144; this.naturalHeight = 6656; images.push(this); }
     addEventListener(name, handler) { this.events[name] = handler; }
+    removeAttribute(name) { if (name === "src") this.src = ""; }
   }
   class Audio {
     constructor(src) { this.src = src; this.played = false; this.paused = false; audio.push(this); }
@@ -42,13 +44,15 @@ function loadPet(api = {}) {
     setTimeout(fn, duration) { timeouts.set(++timerId, fn); durations.set(timerId, duration); return timerId; },
     clearTimeout(id) { timeouts.delete(id); },
   };
+  const requestAnimationFrame = (callback) => { animationFrames.set(++timerId, callback); return timerId; };
+  const cancelAnimationFrame = (id) => animationFrames.delete(id);
   const context = vm.createContext({
-    window, Image, Audio, console, performance,
+    window, Image, Audio, console, performance, requestAnimationFrame, cancelAnimationFrame,
     document: { querySelector: (selector) => selector === "#pet" ? canvas : selector === "#talk" ? talk : bubble,
       documentElement: { style: { setProperty() {} } } },
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/renderer.js"), "utf8"), context);
-  return { context, intervals, timeouts, durations, images, draws, drawCalls, audio, bubble, events,
+  return { context, intervals, timeouts, durations, images, draws, drawCalls, audio, bubble, events, animationFrames,
     fireTimer(id) { const fn = timeouts.get(id); timeouts.delete(id); fn?.(); },
     run: (code) => vm.runInContext(code, context) };
 }

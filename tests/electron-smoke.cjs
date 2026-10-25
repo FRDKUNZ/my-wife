@@ -76,6 +76,10 @@ async function until(check, label, timeout = 15000) {
 function evaluate(window, fn, ...args) {
   return window.webContents.executeJavaScript(`(${fn.toString()})(...${JSON.stringify(args)})`, true);
 }
+function rendererWorkingSet(window) {
+  const pid = window.webContents.getOSProcessId();
+  return app.getAppMetrics().find((metric) => metric.pid === pid)?.memory?.workingSetSize ?? 0;
+}
 async function findWindow(file) {
   const window = await until(() => BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.getURL().endsWith(`/${file}`)), file);
   await until(() => !window.webContents.isLoading(), `${file} loaded`);
@@ -101,6 +105,7 @@ async function run() {
     assert.equal(state.settings.persona.userName, "Alex");
     assert.equal(state.settings.persona.relationship, "partner");
     assert.equal(state.settings.language, "en-US");
+    assert.equal(state.settings.personaMode, "cegil");
     assert.equal(state.settings.scale, 1.5);
     assert.equal(state.settings.characterId, "default");
     assert.equal(state.settings.tts.provider, "custom");
@@ -199,6 +204,11 @@ async function run() {
   await send("First message");
   assert.match(requests.at(-1).messages[0].content, /Alex/);
   assert.match(requests.at(-1).messages[0].content, /fictional romantic companionship/);
+  assert.match(requests.at(-1).messages[0].content, /ACTIVE PERSONA MODE: NORMAL/);
+  await evaluate(pet, () => window.desktopPet.setSettings({ personaMode: "cegil" }));
+  await until(() => evaluate(pet, async () => (await window.desktopPet.getAppState()).settings.personaMode === "cegil"), "Cegil mode update");
+  await send("Cegil mode message");
+  assert.match(requests.at(-1).messages[0].content, /ACTIVE PERSONA MODE: CEGIL/);
   await send("Second message");
   assert.ok(requests.at(-1).messages.some((message) => message.role === "assistant" && message.content === "Test reply received."));
   await send("Failure message");
@@ -226,15 +236,15 @@ async function run() {
     document.querySelector("#save-settings").click();
   });
   await until(() => evaluate(chat, async () => (await window.desktopPet.getChatState()).config.memory.notes.length === 2), "memory saved");
-  await send("Memory context check");
-  assert.match(requests.at(-1).messages[0].content, /Enjoys piano on rainy days/);
+  await send("What music do I enjoy on rainy days?");
+  assert.ok(requests.at(-1).messages.some((message) => message.role === "system" && message.content.includes("Enjoys piano on rainy days")));
   await evaluate(settings, () => {
     document.querySelector("#memory-enabled").checked = false;
     document.querySelector("#save-settings").click();
   });
   await until(() => evaluate(chat, async () => !(await window.desktopPet.getChatState()).config.memory.enabled), "memory disabled");
   await send("Memory off check");
-  assert.doesNotMatch(requests.at(-1).messages[0].content, /Enjoys piano on rainy days/);
+  assert.equal(JSON.stringify(requests.at(-1).messages).includes("Enjoys piano on rainy days"), false);
   await evaluate(settings, () => {
     document.querySelector("#clear-memories").click();
     document.querySelector("#save-settings").click();
@@ -404,6 +414,22 @@ async function run() {
   });
   assert.equal(await evaluate(pet, () => document.querySelector("canvas").toDataURL()), nextFrame);
   await screenshot(pet, "pet");
+  await evaluate(pet, () => window.desktopPet.setSettings({ characterId: "rem", expressionMode: "automatic" }));
+  await until(() => evaluate(pet, () => character.id === "rem" && character.cegilIdle?.streamed === true), "Rem streamed idle setup");
+  await until(() => evaluate(pet, () => [...streamedFrameCache.values()].some((entry) => entry.loaded)), "Rem idle frame decoded");
+  const remStartFrame = await evaluate(pet, () => frameIndex);
+  const remMemoryBefore = rendererWorkingSet(pet);
+  await delay(12000);
+  const remAnimationSample = await evaluate(pet, () => ({
+    frame: frameIndex,
+    cacheSize: streamedFrameCache.size,
+    cornerAlpha: document.querySelector("canvas").getContext("2d").getImageData(0, 0, 1, 1).data[3],
+  }));
+  const remMemoryAfter = rendererWorkingSet(pet);
+  assert.notEqual(remAnimationSample.frame, remStartFrame, "the 12 FPS sequence advances and loops");
+  assert.ok(remAnimationSample.cacheSize <= 10, "the decoded frame cache stays within its configured limit");
+  assert.equal(remAnimationSample.cornerAlpha, 0, "the canvas corner remains transparent");
+  console.log(`Rem idle sample PASS: 12s, cache ${remAnimationSample.cacheSize}/10, renderer working set ${remMemoryBefore}KB -> ${remMemoryAfter}KB.`);
   await evaluate(pet, () => window.desktopPet.setSettings({ characterId: "default", expressionMode: "automatic" }));
   await until(() => evaluate(pet, () => character.id === "default" && spriteImage?.src.includes("/default/")), "default character restored");
   await evaluate(pet, () => {
@@ -522,12 +548,13 @@ async function run() {
   assert.equal(settings.isDestroyed(), false);
   assert.equal(await evaluate(settings, () => document.querySelector("#persona-name").value), "Unsaved");
   // Import uses the real IPC/validation/install path with a predetermined file picker result.
+  const bundledCharacterCount = (await evaluate(settings, () => window.desktopPet.getChatState())).characters.length;
   const originalPicker = dialog.showOpenDialog;
   dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path.join(__dirname, "../assets/characters/default")] });
   await evaluate(settings, () => { document.querySelector("#tab-character").click(); document.querySelector("#import-folder").click(); });
   await until(() => evaluate(settings, () => !document.querySelector("#import-preview").hidden), "import preview");
   await evaluate(settings, () => document.querySelector("#confirm-import").click());
-  await until(() => evaluate(settings, () => document.querySelectorAll(".character-card").length === 3), "installed character visible");
+  await until(() => evaluate(settings, (count) => document.querySelectorAll(".character-card").length === count + 1, bundledCharacterCount), "installed character visible");
   const imported = (await evaluate(settings, () => window.desktopPet.getChatState())).characters.find((item) => item.imported);
   assert.ok(imported);
   await evaluate(pet, (id) => window.desktopPet.setSettings({ characterId: id }), imported.id);
@@ -536,7 +563,7 @@ async function run() {
   dialog.showMessageBox = async () => ({ response: 1 });
   const removed = await evaluate(settings, (id) => window.desktopPet.removeCharacterImport(id), imported.id);
   assert.equal(removed.ok, true);
-  assert.equal(removed.characters.length, 2);
+  assert.equal(removed.characters.length, bundledCharacterCount);
   assert.equal(fs.existsSync(path.join(dataDir, "characters", imported.id)), false);
   dialog.showOpenDialog = originalPicker;
   dialog.showMessageBox = originalDialog;

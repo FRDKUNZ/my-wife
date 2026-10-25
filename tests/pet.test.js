@@ -27,6 +27,36 @@ test("a stale sprite load cannot overwrite the selected character", async () => 
   assert.equal(pet.intervals.size, 1);
 });
 
+test("Cegil mode pins its streamed animation against idle, click, expression and stale callbacks", async () => {
+  const pet = loadPet();
+  pet.run(`applyAppState({activeCharacter:{...FALLBACK_CHARACTER,id:"rem",cegilIdle:{streamed:true,loop:true,frames:3,interval:1000/12,framePaths:["cegil-0.png","cegil-1.png","cegil-2.png"]}},settings:{personaMode:"normal",expressionMode:"automatic"}})`);
+  pet.images[0].events.load();
+  await Promise.resolve();
+  assert.equal(pet.intervals.size, 1);
+  pet.run(`applyAppState({activeCharacter:{...FALLBACK_CHARACTER,id:"rem",cegilIdle:{streamed:true,loop:true,frames:3,interval:1000/12,framePaths:["cegil-0.png","cegil-1.png","cegil-2.png"]}},settings:{personaMode:"cegil",expressionMode:"automatic"}})`);
+  assert.equal(pet.run("state"), "idle");
+  assert.equal(pet.intervals.size, 0);
+  assert.equal(pet.animationFrames.size, 1);
+  const oldCegilTick = [...pet.animationFrames.values()][0];
+  const firstSequenceImage = pet.images.find((image) => image.src === "cegil-0.png");
+  assert.ok(firstSequenceImage);
+  firstSequenceImage.events.load();
+  pet.run('setState("waving"); playTemporary("review"); setStaticExpression("idle",2); applyExpressionRequest({state:"angry"})');
+  assert.equal(pet.run("state"), "idle");
+  const tickId = [...pet.animationFrames.keys()][0];
+  const tick = pet.animationFrames.get(tickId);
+  pet.animationFrames.delete(tickId);
+  tick(performance.now() + 90);
+  assert.equal(pet.run("frameIndex"), 1);
+  assert.equal(pet.run("state"), "idle");
+  pet.run(`applyAppState({activeCharacter:{...FALLBACK_CHARACTER,id:"rem",cegilIdle:{streamed:true,loop:true,frames:3,interval:1000/12,framePaths:["cegil-0.png","cegil-1.png","cegil-2.png"]}},settings:{personaMode:"normal",expressionMode:"automatic"}})`);
+  assert.equal(pet.animationFrames.size, 0);
+  assert.equal(pet.run("streamedFrameCache.size"), 0);
+  oldCegilTick(performance.now() + 180);
+  assert.equal(pet.run("state"), "idle");
+  assert.equal(pet.intervals.size, 1);
+});
+
 test("individual PNG action frames preload and render as a contextual conversation animation", async () => {
   const pet = loadPet();
   pet.run(`applyAppState({
