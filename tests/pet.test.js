@@ -57,6 +57,50 @@ test("Cegil mode pins its streamed animation against idle, click, expression and
   assert.equal(pet.intervals.size, 1);
 });
 
+test("Mode Animasi uses Fish playback and its PNG sequences, then restores Normal without stale callbacks", async () => {
+  const pet = loadPet({ synthesizeSpeech: async () => ({ ok: true, audioDataUrl: "fish-response" }) });
+  const assets = {
+    idle: { streamed: true, frames: 2, interval: 80, framePaths: ["idle-0.png", "idle-1.png"] },
+    speak: { streamed: true, frames: 2, interval: 80, framePaths: ["speak-0.png", "speak-1.png"] },
+    cegil: { streamed: true, frames: 2, interval: 80, framePaths: ["special-cegil-0.png", "special-cegil-1.png"] },
+  };
+  const character = JSON.stringify({ id: "rem", spritePath: "rem.png", animationAssets: assets });
+  pet.run(`applyAppState({activeCharacter:${character},settings:{personaMode:"normal",animationMode:"normal",expressionMode:"automatic"}})`);
+  pet.images.at(-1).events.load();
+  await Promise.resolve();
+  const staleNormalTick = [...pet.intervals.values()][0];
+  pet.run(`applyAppState({activeCharacter:${character},settings:{personaMode:"normal",animationMode:"animation",expressionMode:"automatic",tts:{provider:"fish"}}})`);
+  assert.equal(pet.intervals.size, 0);
+  assert.equal(pet.animationFrames.size, 1);
+  let idleFrame = pet.images.find((image) => image.src === "idle-0.png");
+  assert.ok(idleFrame);
+  idleFrame.events.load();
+  assert.equal(pet.draws.at(-1), "idle-0.png");
+  pet.run('settings.tts = {enabled:true,provider:"fish",volume:1}');
+  const speaking = pet.run('speakText("Hello")');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(pet.audio[0].played, true);
+  assert.equal(pet.run("fishAudioPlaying"), true);
+  const speakFrame = pet.images.find((image) => image.src === "speak-0.png");
+  assert.ok(speakFrame);
+  speakFrame.events.load();
+  assert.equal(pet.draws.at(-1), "speak-0.png");
+  pet.audio[0].onended();
+  await speaking;
+  assert.equal(pet.run("fishAudioPlaying"), false);
+  assert.equal(pet.draws.at(-1), "idle-0.png");
+  pet.run('manualCegilUntil=performance.now()+10000; startAnimation()');
+  const cegilFrame = pet.images.find((image) => image.src === "special-cegil-0.png");
+  assert.ok(cegilFrame);
+  cegilFrame.events.load();
+  assert.equal(pet.draws.at(-1), "special-cegil-0.png");
+  pet.run(`applyAppState({activeCharacter:${character},settings:{personaMode:"normal",animationMode:"normal",expressionMode:"automatic"}})`);
+  assert.equal(pet.animationFrames.size, 0);
+  assert.equal(pet.intervals.size, 1);
+  staleNormalTick();
+  assert.equal(pet.intervals.size, 1);
+});
+
 test("individual PNG action frames preload and render as a contextual conversation animation", async () => {
   const pet = loadPet();
   pet.run(`applyAppState({

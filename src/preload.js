@@ -74,6 +74,11 @@ contextBridge.exposeInMainWorld("desktopPet", {
     ipcRenderer.on("expression-requested", listener);
     return () => ipcRenderer.off("expression-requested", listener);
   },
+  onAnimationCegil: (callback) => {
+    const listener = (_event, enabled) => callback(enabled === true);
+    ipcRenderer.on("animation-cegil", listener);
+    return () => ipcRenderer.off("animation-cegil", listener);
+  },
   onPetMessage: (callback) => {
     const listener = (_event, message) => callback(message);
     ipcRenderer.on("pet-message", listener);

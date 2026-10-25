@@ -210,13 +210,20 @@ test("native context menu offers both persona modes and checks the selected mode
   } } });
   app.run('mainWindow = {}; updateSettings = (patch) => { settings = normalizeSettings({ ...settings, ...patch }); }; showContextMenu()');
   let modeItems = lastTemplate.find((item) => item.label === "Mode").submenu;
-  assert.equal(modeItems.map((item) => item.label).join(","), "Mode Normal,Mode Cegil");
+  assert.equal(modeItems.map((item) => item.label).join(","), "Mode Normal,Mode Cegil,Mode Animasi");
   assert.equal(modeItems[0].checked, true);
   modeItems[1].click();
   app.run("showContextMenu()");
   modeItems = lastTemplate.find((item) => item.label === "Mode").submenu;
   assert.equal(modeItems[0].checked, false);
   assert.equal(modeItems[1].checked, true);
+  assert.equal(modeItems[2].checked, false);
+  modeItems[2].click();
+  assert.equal(app.run("settings.animationMode"), "animation");
+  assert.equal(app.run("settings.personaMode"), "cegil");
+  app.run("showContextMenu()");
+  modeItems = lastTemplate.find((item) => item.label === "Mode").submenu;
+  assert.equal(modeItems[2].checked, true);
 });
 
 test("Rem keeps its built-in Normal idle and exposes the separate Cegil sequence in numeric order", () => {
@@ -230,6 +237,11 @@ test("Rem keeps its built-in Normal idle and exposes the separate Cegil sequence
   assert.equal(idle.interval, 1000 / 12);
   assert.match(idle.framePaths[0], /rem%20cegil_00000\.png$/);
   assert.match(idle.framePaths[121], /rem%20cegil_00121\.png$/);
+  assert.equal(character.animationAssets.idle.frames, 104);
+  assert.equal(character.animationAssets.speak.frames, 84);
+  assert.equal(character.animationAssets.cegil.frames, 122);
+  assert.match(character.animationAssets.idle.framePaths[0], /rem%20idle%202/);
+  assert.match(character.animationAssets.speak.framePaths[0], /speak/);
 });
 
 test("preferred names and relationships remain isolated between characters", () => {

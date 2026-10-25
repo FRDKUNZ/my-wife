@@ -42,6 +42,8 @@ let settings = {
   language: "system",
   resolvedLanguage: "zh-CN",
   personaMode: "normal",
+  animationMode: "normal",
+  cegilLocked: false,
   expressionMode: "automatic",
   interactionResponses: true,
   userName: "",
@@ -84,6 +86,8 @@ let speechGeneration = 0;
 let speechId = null;
 let activeAudio = null;
 let speechActive = false;
+let fishAudioPlaying = false;
+let manualCegilUntil = 0;
 let speechWatchdog;
 let conversationActive = false;
 let voiceLineAudio = null;
@@ -108,7 +112,18 @@ function text(key, variables = {}) {
 }
 
 function isCegilAnimationMode() {
-  return settings.personaMode === "cegil" && character.id === "rem";
+  return (settings.animationMode === "cegil" || (!settings.animationMode && settings.personaMode === "cegil")) && character.id === "rem";
+}
+
+function isAnimationMode() {
+  return settings.animationMode === "animation";
+}
+
+function activeAnimationAsset() {
+  const assets = character.animationAssets || {};
+  if (settings.cegilLocked || performance.now() < manualCegilUntil) return assets.cegil || assets.idle;
+  if (fishAudioPlaying) return assets.speak || assets.idle;
+  return assets.idle;
 }
 
 function clearStreamedFrameCache() {
@@ -130,6 +145,22 @@ function drawCegilFallback() {
 }
 
 function draw() {
+  if (isAnimationMode()) {
+    const current = activeAnimationAsset();
+    if (!current?.framePaths?.length) { ctx.clearRect(0, 0, canvas.width, canvas.height); console.error("[animation] Mode Animasi asset unavailable", current); return; }
+    const framePath = current.framePaths[frameIndex % current.frames];
+    const entry = streamedFrameCache.get(framePath);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!entry?.loaded) { requestStreamedFrame(framePath); preloadStreamedFrames(current, frameIndex); return; }
+    const image = entry.image;
+    streamedFrameCache.delete(framePath); streamedFrameCache.set(framePath, entry);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const scale = Math.min(canvas.width / image.naturalWidth, canvas.height / image.naturalHeight);
+    const width = image.naturalWidth * scale, height = image.naturalHeight * scale;
+    ctx.drawImage(image, (canvas.width - width) / 2, canvas.height - height, width, height);
+    preloadStreamedFrames(current, frameIndex);
+    return;
+  }
   const cegilMode = isCegilAnimationMode();
   if (!spriteImage && !cegilMode) return;
   let current = cegilMode ? character.cegilIdle : character.states[state];
@@ -239,6 +270,30 @@ function startAnimation() {
   if (animationRaf) cancelAnimationFrame(animationRaf);
   animationRaf = 0;
   const generation = ++animationGeneration;
+  if (isAnimationMode()) {
+    frameIndex = 0;
+    if (!activeAnimationAsset()?.framePaths?.length) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      console.error("[animation] Mode Animasi asset unavailable for the selected character");
+      return;
+    }
+    const tick = (now) => {
+      if (generation !== animationGeneration || !isAnimationMode() || document.hidden) { animationRaf = 0; return; }
+      const current = activeAnimationAsset();
+      if (!current?.framePaths?.length) { ctx.clearRect(0, 0, canvas.width, canvas.height); animationRaf = requestAnimationFrame(tick); return; }
+      if (tick.asset !== current) { tick.asset = current; tick.last = now; frameIndex = 0; draw(); }
+      if (now - tick.last >= current.interval) {
+        const steps = Math.max(1, Math.floor((now - tick.last) / current.interval));
+        frameIndex = (frameIndex + steps) % current.frames;
+        tick.last += steps * current.interval;
+        draw();
+      }
+      animationRaf = requestAnimationFrame(tick);
+    };
+    draw();
+    animationRaf = requestAnimationFrame(tick);
+    return;
+  }
   const cegilMode = isCegilAnimationMode();
   const current = cegilMode ? character.cegilIdle : (character.states[state] || character.states.idle);
   if (document.hidden) return;
@@ -284,6 +339,7 @@ function startAnimation() {
 }
 
 function setState(nextState) {
+  if (isAnimationMode()) return;
   if (isCegilAnimationMode()) {
     if (nextState !== "idle") console.debug(`[animation] mode=cegil source=sequence reason=ignored-state-request:${nextState}`);
     return;
@@ -300,7 +356,7 @@ function setState(nextState) {
 function scheduleIdleBehavior() {
   window.clearTimeout(idleTimer);
   const generation = ++idleScheduleGeneration;
-  if (isCegilAnimationMode() || settings.expressionMode !== "automatic" || conversationActive) return;
+  if (isCegilAnimationMode() || isAnimationMode() || settings.expressionMode !== "automatic" || conversationActive) return;
 
   const delay = 22000 + Math.random() * 15000;
   idleTimer = window.setTimeout(() => {
@@ -323,7 +379,7 @@ function temporaryDuration(nextState) {
 }
 
 function playTemporary(nextState, duration = temporaryDuration(nextState)) {
-  if (isCegilAnimationMode()) return;
+  if (isCegilAnimationMode() || isAnimationMode()) return;
   if (!character.states[nextState]) return;
   window.clearTimeout(idleTimer);
   temporaryToken += 1;
@@ -340,7 +396,7 @@ function playTemporary(nextState, duration = temporaryDuration(nextState)) {
 }
 
 function applyExpressionRequest(request = {}) {
-  if (isCegilAnimationMode()) return;
+  if (isCegilAnimationMode() || isAnimationMode()) return;
   const requested = request.state;
   if (requested === "listening_music") {
     musicModeEnabled = request.enabled === true;
@@ -368,6 +424,7 @@ function nextStaticExpression() {
 }
 
 function setStaticExpression(nextState, nextFrame) {
+  if (isAnimationMode()) return;
   if (isCegilAnimationMode()) return;
   if (!character.states[nextState]) return;
   window.clearTimeout(idleTimer);
@@ -384,6 +441,7 @@ function normalizeCharacter(nextCharacter) {
   merged.frame = { ...FALLBACK_CHARACTER.frame, ...(nextCharacter?.frame || {}) };
   merged.states = nextCharacter?.states || FALLBACK_CHARACTER.states;
   merged.cegilIdle = nextCharacter?.cegilIdle || null;
+  merged.animationAssets = nextCharacter?.animationAssets || {};
   merged.automaticActions = Array.isArray(nextCharacter?.automaticActions)
     ? nextCharacter.automaticActions
     : FALLBACK_CHARACTER.automaticActions;
@@ -403,10 +461,15 @@ function applyAppState(nextAppState = {}) {
   const previousPersonaMode = settings.personaMode === "cegil" ? "cegil" : "normal";
   const nextPersonaMode = nextAppState.settings?.personaMode === "cegil" ? "cegil" : "normal";
   const personaModeChanged = nextPersonaMode !== previousPersonaMode;
+  const previousAnimationMode = settings.animationMode || previousPersonaMode;
+  const nextAnimationMode = ["normal", "cegil", "animation"].includes(nextAppState.settings?.animationMode)
+    ? nextAppState.settings.animationMode : nextPersonaMode;
+  const animationModeChanged = nextAnimationMode !== previousAnimationMode;
   const expressionModeChanged = nextAppState.settings?.expressionMode !== settings.expressionMode;
   const voiceLinesWereEnabled = settings.voiceLines?.enabled === true;
   const previousTts = JSON.stringify(settings.tts);
   const previousMusicMode = musicModeEnabled;
+  const previousCegilLocked = settings.cegilLocked === true;
   musicModeEnabled = nextAppState.musicModeEnabled === true;
   character = nextCharacter;
   settings = {
@@ -414,6 +477,8 @@ function applyAppState(nextAppState = {}) {
     resolvedLanguage: nextAppState.resolvedLanguage || nextAppState.settings?.resolvedLanguage || "zh-CN",
     characterId: nextAppState.settings?.characterId || character.id,
     personaMode: nextPersonaMode,
+    animationMode: nextAnimationMode,
+    cegilLocked: nextAppState.settings?.cegilLocked === true,
     expressionMode: nextAppState.settings?.expressionMode === "clickOnly" ? "clickOnly" : "automatic",
     interactionResponses: nextAppState.settings?.interactionResponses !== false,
     userName: nextAppState.settings?.persona?.userName || "",
@@ -519,13 +584,34 @@ function applyAppState(nextAppState = {}) {
     return;
   }
 
-  if (personaModeChanged) applyPersonaModeChange(previousPersonaMode, settings.personaMode);
+  if (animationModeChanged) applyAnimationModeChange(previousAnimationMode, settings.animationMode);
+  else if (personaModeChanged && !isAnimationMode()) applyPersonaModeChange(previousPersonaMode, settings.personaMode);
+  else if (isAnimationMode() && previousCegilLocked !== settings.cegilLocked) startAnimation();
   else if (expressionModeChanged && !isCegilAnimationMode()) resetAfterSettingsChange();
   else if (!isCegilAnimationMode() && previousMusicMode !== musicModeEnabled) {
     if (settings.expressionMode === "automatic" || musicModeEnabled) {
       setState(musicModeEnabled ? "listening_music" : (conversationActive ? conversationAction : "idle"));
     }
   }
+}
+
+function applyAnimationModeChange(previousMode, nextMode) {
+  console.info(`[animation] mode=${nextMode} source=animation-setting reason=mode-change from=${previousMode}`);
+  window.clearInterval(animationTimer);
+  if (animationRaf) cancelAnimationFrame(animationRaf);
+  animationRaf = 0;
+  animationGeneration += 1;
+  window.clearTimeout(idleTimer);
+  idleScheduleGeneration += 1;
+  temporaryToken += 1;
+  temporaryAnimationActive = false;
+  manualCegilUntil = 0;
+  clearStreamedFrameCache();
+  frameIndex = 0;
+  state = "idle";
+  if (isAnimationMode()) startAnimation();
+  else if (isCegilAnimationMode()) startAnimation();
+  else resetAfterSettingsChange();
 }
 
 function applyPersonaModeChange(previousMode, nextMode) {
@@ -558,7 +644,9 @@ function resetAfterSettingsChange() {
   temporaryAnimationActive = false;
   state = isCegilAnimationMode() ? "idle" : (musicModeEnabled && character.states.listening_music ? "listening_music" : "idle");
   frameIndex = 0;
-  if (isCegilAnimationMode()) {
+  if (isAnimationMode()) {
+    startAnimation();
+  } else if (isCegilAnimationMode()) {
     startAnimation();
     scheduleIdleBehavior();
   } else if (settings.expressionMode === "clickOnly" && !musicModeEnabled) {
@@ -931,6 +1019,9 @@ function chooseTtsVoice() {
 function stopSpeech(status = "idle", reason = "") {
   speechToken += 1;
   speechActive = false;
+  const wasFishPlaying = fishAudioPlaying;
+  fishAudioPlaying = false;
+  if (wasFishPlaying && isAnimationMode()) startAnimation();
   if (speechId !== null) window.desktopPet.speechStateChanged({ id: speechId, status, ...(reason ? { reason } : {}) });
   speechId = null;
   window.clearTimeout(speechWatchdog);
@@ -988,10 +1079,14 @@ async function speakText(text) {
             finishSpeech(token, true, "audio_creation_failed");
             return;
           }
-          activeAudio.onended = playNext;
+          activeAudio.onended = () => {
+            if (token === speechToken && settings.tts.provider === "fish") { fishAudioPlaying = false; if (isAnimationMode()) startAnimation(); }
+            playNext();
+          };
           activeAudio.onerror = () => finishSpeech(token, true, "audio_playback_failed");
           try { await activeAudio.play(); }
           catch { finishSpeech(token, true, "audio_playback_failed"); return; }
+          if (token === speechToken && settings.tts.provider === "fish") { fishAudioPlaying = true; if (isAnimationMode()) startAnimation(); }
           if (token === speechToken) window.desktopPet.speechStateChanged({ id, status: "playing" });
         } else {
           if (!("speechSynthesis" in window)) { finishSpeech(token, true); return; }
@@ -1107,6 +1202,11 @@ window.desktopPet.onSpeechStopped((generation) => {
   if (bubbleVisible) hideBubbleLater(Math.max(3000, bubbleRemaining));
 });
 window.desktopPet.onExpressionRequested?.(applyExpressionRequest);
+window.desktopPet.onAnimationCegil?.((enabled) => {
+  if (!isAnimationMode()) return;
+  manualCegilUntil = enabled ? performance.now() + 10000 : 0;
+  startAnimation();
+});
 
 function handlePetMessage(message = {}) {
   if (message.clear) {
@@ -1178,7 +1278,7 @@ function loadSprite(spritePath) {
 
 function requestStreamedFrame(framePath) {
   if (!framePath || streamedFrameCache.has(framePath)) return;
-  if (!isCegilAnimationMode()) return;
+  if (!isCegilAnimationMode() && !isAnimationMode()) return;
   while (streamedFrameCache.size >= STREAMED_FRAME_CACHE_LIMIT) {
     const oldestPath = streamedFrameCache.keys().next().value;
     const oldest = streamedFrameCache.get(oldestPath);
@@ -1190,12 +1290,13 @@ function requestStreamedFrame(framePath) {
   const entry = { image, loaded: false, generation };
   streamedFrameCache.set(framePath, entry);
   image.addEventListener("load", () => {
-    if (generation !== streamedFrameGeneration || !isCegilAnimationMode() || streamedFrameCache.get(framePath) !== entry) return;
+    if (generation !== streamedFrameGeneration || (!isCegilAnimationMode() && !isAnimationMode()) || streamedFrameCache.get(framePath) !== entry) return;
     entry.loaded = true;
-    if (state === "idle" && character.cegilIdle?.framePaths?.[frameIndex] === framePath) draw();
+    if ((isAnimationMode() && activeAnimationAsset()?.framePaths?.[frameIndex] === framePath)
+      || (isCegilAnimationMode() && state === "idle" && character.cegilIdle?.framePaths?.[frameIndex] === framePath)) draw();
   }, { once: true });
   image.addEventListener("error", (error) => {
-    if (generation === streamedFrameGeneration && isCegilAnimationMode() && streamedFrameCache.get(framePath) === entry) {
+    if (generation === streamedFrameGeneration && (isCegilAnimationMode() || isAnimationMode()) && streamedFrameCache.get(framePath) === entry) {
       streamedFrameCache.delete(framePath);
       failedStreamedFrames.add(framePath);
       console.error("Unable to load Rem idle frame", framePath, error);

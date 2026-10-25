@@ -39,6 +39,8 @@ const DEFAULT_SETTINGS = {
   characterId: DEFAULT_CHARACTER_ID,
   expressionMode: "automatic",
   personaMode: "normal",
+  animationMode: "normal",
+  cegilLocked: false,
   interactionResponses: true,
   scale: 1,
   alwaysOnTop: true,
@@ -310,7 +312,27 @@ function normalizeCharacterPack(rawPack, folderName) {
   const columns = Number(rawPack.columns) || 8;
   const states = rawPack.states && typeof rawPack.states === "object" ? rawPack.states : {};
   let cegilIdle = null;
+  const animationAssets = {};
   if (folderName === "rem") {
+    for (const [animationName, animationFolder, pattern] of [
+      ["idle", "rem idle 2", /^gemini_generated_video_6826cc4d_(\d+)\.png$/i],
+      ["speak", "speak", /^gemini_generated_video_b5316123_1080p_upscaled_(\d+)\.png$/i],
+      ["cegil", "rem cegil 3", /^rem cegil_(\d+)\.png$/i],
+    ]) {
+      const directory = path.join(CHARACTERS_DIR, animationFolder);
+      try {
+        const indexed = fs.readdirSync(directory).flatMap((file) => {
+          const match = file.match(pattern);
+          return match ? [{ file, index: Number.parseInt(match[1], 10) }] : [];
+        }).sort((left, right) => left.index - right.index);
+        if (indexed.length && indexed.every((item, index) => item.index === index)) {
+          animationAssets[animationName] = {
+            frames: indexed.length, interval: 1000 / 12, loop: true, streamed: true,
+            framePaths: indexed.map(({ file }) => publicAssetPath("characters", animationFolder, file)),
+          };
+        } else console.warn(`[assets] Rem ${animationName} animation is missing or non-contiguous`);
+      } catch (error) { console.warn(`[assets] Rem ${animationName} animation unavailable`, error.message); }
+    }
     const idleDirectory = path.join(CHARACTERS_DIR, "rem cegil 3");
     try {
       const names = fs.readdirSync(idleDirectory).filter((name) => /^rem cegil_(\d+)\.png$/i.test(name))
@@ -365,6 +387,7 @@ function normalizeCharacterPack(rawPack, folderName) {
     columns,
     states,
     cegilIdle,
+    animationAssets,
     automaticActions,
     clickActions,
     staticExpressions,
@@ -576,6 +599,9 @@ function normalizeSettings(nextSettings) {
   const characterId = getCharacterPack(requestedCharacterId)?.id || DEFAULT_CHARACTER_ID;
   const expressionMode = nextSettings.expressionMode === "clickOnly" ? "clickOnly" : "automatic";
   const personaMode = ["normal", "cegil"].includes(nextSettings.personaMode) ? nextSettings.personaMode : "normal";
+  const animationMode = ["normal", "cegil", "animation"].includes(nextSettings.animationMode)
+    ? nextSettings.animationMode
+    : (personaMode === "cegil" ? "cegil" : "normal");
   const scale = nearestScale(Number(nextSettings.scale) || 1);
   const alwaysOnTop = nextSettings.alwaysOnTop !== false;
   const restReminderMinutes = [0, 30, 60].includes(Number(nextSettings.restReminderMinutes))
@@ -617,6 +643,8 @@ function normalizeSettings(nextSettings) {
     characterId,
     expressionMode,
     personaMode,
+    animationMode,
+    cegilLocked: nextSettings.cegilLocked === true,
     interactionResponses: nextSettings.interactionResponses !== false,
     scale,
     alwaysOnTop,
@@ -2324,11 +2352,14 @@ async function runAutonomousConversation({ manualTest = false } = {}) {
     `Konteks lokal: aplikasi Rem aktif dan siap; ${activityContext} Waktu perangkat saat ini: ${localDateTime} (${localTimeZone}). Gunakan waktu ini sebagai acuan jika menyebut pagi, siang, sore, malam, atau memberi sapaan berbasis waktu; jangan menebak waktu dari suasana atau konteks lain. Input keyboard/mouse terakhir sekitar ${inputIdleSeconds === null ? "tidak tersedia" : `${inputIdleSeconds} detik lalu`}. Waktu sejak ucapan proaktif sebelumnya: ${lastSpokeSeconds === null ? "belum pernah" : `${lastSpokeSeconds} detik`}.`,
     "Bicaralah seperti Rem yang sedang berbagi pikiran spontan, bukan membacakan pengumuman. Gunakan bahasa Indonesia sehari-hari, ritme kalimat yang bervariasi, dan nada hangat yang sesuai isi. Sesekali—jarang saja—Rem boleh menggoda Ferdi dengan frasa atau satu kalimat pendek dalam bahasa Jepang, lalu lanjutkan dalam bahasa Indonesia agar tetap terasa alami. Dalam momen mesra yang cocok, Rem boleh mengucapkan atau memainkan ciuman ringan dan manis secara fiksi, tanpa detail eksplisit. Sesekali boleh memakai 'eh', 'hmm', komentar kecil, candaan, atau potongan kalimat, tetapi jangan menjadikannya pola tetap. Tidak perlu selalu bertanya, menyapa, atau menyebut nama pengguna. Jangan terdengar formal, seperti customer service, terlalu puitis, atau terlalu bersemangat tanpa alasan.",
     `Arah ringan untuk giliran ini: ${spontaneousAngle}. Ikuti hanya jika cocok dengan konteks; jangan menyebut instruksi ini.`,
+    settings.personaMode === "cegil"
+      ? "MODE CEGIL: tunjukkan sayang dan manja secara ekspresif dalam ucapan singkat yang terasa spontan. Jangan mengulang perhatian/topik yang sama, termasuk soal makan, kecuali memang relevan dengan percakapan."
+      : "MODE NORMAL: tetap hangat dan perhatian dengan ucapan santai, singkat, dan tidak berlebihan.",
     "Pilih idle untuk sebagian besar obrolan. Pilih memberi_semangat khusus ketika ucapan utama Rem menyemangati atau mendukung pengguna. Pilih tea saat Rem benar-benar menawarkan atau menyarankan minuman. Rem harus terdengar hangat dan perhatian; tsundere hanya sebagai bumbu sangat ringan dan sesekali untuk rasa malu yang memang cocok, bukan sebagai nada utama atau respons otomatis terhadap pujian. Gunakan ekspresi ceria/penasaran hanya jika keadaan mendukung; angry hanya jika konteks jelas menunjukkan kekesalan. Jangan pilih state yang tidak tercantum dan jangan menulis nama ekspresi sebagai kata-kata lisan.",
     "Jangan menyapa seolah Ferdi baru datang atau baru membuka aplikasi. Utamakan tindak lanjut percakapan sebelumnya, komentar ringan tentang aplikasi yang stabil, cerita/candaan singkat, atau pengamatan kecil yang spesifik. Nama aplikasi hanya menunjukkan aplikasi foreground; jangan mengarang isi layar, aktivitas rinci, skor, ronde, kemenangan, lokasi, atau data lain yang tidak tersedia.",
     "Jangan mengulang pembuka, topik, atau kalimat berikut:",
     recent,
-    "Buat satu sampai tiga kalimat pendek yang enak diucapkan dan umumnya di bawah 220 karakter. Output hanya dalam format [expression:state] ucapan Rem, tanpa kata SPEAK atau label lainnya. Jangan tulis JSON, arahan suara, atau penjelasan alasan.",
+    "Buat tepat satu kalimat pendek yang enak diucapkan (maksimal sekitar 120 karakter). Output hanya [expression:state] lalu kalimat Rem. Jangan tulis label lain, JSON, arahan suara, atau penjelasan.",
   ].join("\n");
   const requestController = autonomousRequestController;
   try {
@@ -2342,8 +2373,9 @@ async function runAutonomousConversation({ manualTest = false } = {}) {
     else if (/^WAIT\s*$/i.test(result.reply || "")) console.info("[autonomous] assistant returned WAIT; using a local fallback line");
     const cleanSpokenReply = String(result.reply || "").trim().replace(/^SPEAK\s*:\s*/i, "");
     if (result.ok && cleanSpokenReply && !/^WAIT\s*$/i.test(cleanSpokenReply)) {
-      spokenText = cleanSpokenReply.slice(0, 600);
-      action = result.action || "idle";
+      const parsedReply = parseCompanionReply(cleanSpokenReply, getCharacterPack()?.states || { idle: {} });
+      spokenText = parsedReply.text.slice(0, 240);
+      action = result.action || parsedReply.action || "idle";
     }
     if (!spokenText) spokenText = autonomousFallbackText(stableActivity?.appName || "");
     action = dialogueAnimationAction(spokenText, action);
@@ -2723,6 +2755,13 @@ function showContextMenu() {
 
   const menu = Menu.buildFromTemplate([
     {
+      label: "Animasi Mode Animasi",
+      submenu: [
+        { label: "Pilih Cegil", enabled: settings.animationMode === "animation", click: () => mainWindow?.webContents.send("animation-cegil", true) },
+        { label: "Cegil menetap", type: "checkbox", checked: settings.cegilLocked, enabled: settings.animationMode === "animation", click: (item) => updateSettings({ cegilLocked: item.checked }) },
+      ],
+    },
+    {
       label: "Animasi Rem",
       submenu: [
         { label: "Tsundere", click: () => chooseExpression("tsundere") },
@@ -2738,8 +2777,9 @@ function showContextMenu() {
     {
       label: "Mode",
       submenu: [
-        { label: "Mode Normal", type: "radio", checked: settings.personaMode === "normal", click: () => updateSettings({ personaMode: "normal" }) },
-        { label: "Mode Cegil", type: "radio", checked: settings.personaMode === "cegil", click: () => updateSettings({ personaMode: "cegil" }) },
+        { label: "Mode Normal", type: "radio", checked: settings.animationMode === "normal", click: () => updateSettings({ personaMode: "normal", animationMode: "normal", cegilLocked: false }) },
+        { label: "Mode Cegil", type: "radio", checked: settings.animationMode === "cegil", click: () => updateSettings({ personaMode: "cegil", animationMode: "cegil", cegilLocked: false }) },
+        { label: "Mode Animasi", type: "radio", checked: settings.animationMode === "animation", click: () => updateSettings({ animationMode: "animation", cegilLocked: false }) },
       ],
     },
     {
