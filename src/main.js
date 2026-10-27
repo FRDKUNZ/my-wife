@@ -23,6 +23,7 @@ const { modelsEndpoint, readModelList } = require("./model-list");
 const { readPack, installPack } = require("./character-import");
 const { pathToFileURL } = require("node:url");
 const voiceLineLibrary = require("./voice-line-library");
+const { buildModeAnimationRegistry } = require("./mode-animation-registry");
 const { execFile, spawn } = require("node:child_process");
 const { promisify } = require("node:util");
 const execFileAsync = promisify(execFile);
@@ -32,7 +33,7 @@ const BUBBLE_HEIGHT = 132;
 const MIN_BUBBLE_WIDTH = 320;
 const DEFAULT_CHARACTER_ID = "default";
 const CHARACTERS_DIR = path.join(__dirname, "..", "assets", "characters");
-const SIZE_PRESETS = [0.75, 1, 1.25, 1.5, 1.75, 2];
+const SIZE_PRESETS = [0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
 const MINUTE_MS = 60 * 1000;
 const DEFAULT_SETTINGS = {
   language: "system",
@@ -136,6 +137,7 @@ let autonomousLastSpokeAt = 0;
 let autonomousBusy = false;
 let autonomousRequestController = null;
 let musicModeEnabled = false;
+let animationCryingEnabled = false;
 let voiceLinePlaying = false;
 let lastUserActivityAt = Date.now();
 const autonomousRecentOpeners = [];
@@ -313,7 +315,9 @@ function normalizeCharacterPack(rawPack, folderName) {
   const states = rawPack.states && typeof rawPack.states === "object" ? rawPack.states : {};
   let cegilIdle = null;
   const animationAssets = {};
+  let modeAnimationRegistry = [];
   if (folderName === "rem") {
+    modeAnimationRegistry = buildModeAnimationRegistry(CHARACTERS_DIR, publicAssetPath);
     for (const [animationName, animationFolder, pattern] of [
       ["idle", "rem idle 2", /^gemini_generated_video_6826cc4d_(\d+)\.png$/i],
       ["speak", "speak", /^gemini_generated_video_b5316123_1080p_upscaled_(\d+)\.png$/i],
@@ -388,6 +392,7 @@ function normalizeCharacterPack(rawPack, folderName) {
     states,
     cegilIdle,
     animationAssets,
+    modeAnimationRegistry,
     automaticActions,
     clickActions,
     staticExpressions,
@@ -1053,6 +1058,7 @@ function updateSettings(patch) {
     voiceLines: { ...settings.voiceLines, ...(patch?.voiceLines || {}), sourceFolder: voiceFolderOverride || settings.voiceLines?.sourceFolder || "", collections: registeredVoiceCollections },
   };
   const normalized = normalizeSettings(nextSettings);
+  if (normalized.animationMode !== settings.animationMode) animationCryingEnabled = false;
   if (JSON.stringify(normalized.tts) !== JSON.stringify(settings.tts)) stopVoice();
   if (normalized.characterId !== settings.characterId
     || JSON.stringify(normalized.persona) !== JSON.stringify(settings.persona)
@@ -2004,6 +2010,7 @@ async function sendChatMessage(_event, rawText, context) {
       source: "chat",
       speak: result.ok,
       bubbleText: bubblePreview(result.reply),
+      failed: !result.ok,
     });
     if (result.ok) recordChatTimeProgress();
     updateMoodFromInteraction("chat");
@@ -2759,6 +2766,7 @@ function showContextMenu() {
       submenu: [
         { label: "Pilih Cegil", enabled: settings.animationMode === "animation", click: () => mainWindow?.webContents.send("animation-cegil", true) },
         { label: "Cegil menetap", type: "checkbox", checked: settings.cegilLocked, enabled: settings.animationMode === "animation", click: (item) => updateSettings({ cegilLocked: item.checked }) },
+        { label: "Menangis", type: "checkbox", checked: animationCryingEnabled, enabled: settings.animationMode === "animation", click: (item) => { animationCryingEnabled = item.checked; mainWindow?.webContents.send("animation-condition", item.checked ? "crying" : "idle"); } },
       ],
     },
     {

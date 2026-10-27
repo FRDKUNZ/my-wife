@@ -16,14 +16,14 @@ test("invalid settings fall back to usable values and supported sizes", () => {
   const app = loadMain();
   const settings = app.run('normalizeSettings({characterId:"missing",scale:100,expressionMode:"invalid",restReminderMinutes:4,assistant:{baseUrl:"file:///invalid",temperature:99,maxHistory:0},tts:{provider:"invalid",rate:99}})');
   assert.equal(settings.characterId, "default");
-  assert.equal(settings.scale, 2);
+  assert.equal(settings.scale, 3);
   assert.equal(settings.expressionMode, "automatic");
   assert.equal(settings.restReminderMinutes, 0);
   assert.equal(settings.assistant.baseUrl, "");
   assert.equal(settings.assistant.temperature, 2);
   assert.equal(settings.assistant.maxHistory, 2);
   assert.equal(settings.tts.provider, "none");
-  for (const scale of [0.75, 1, 1.25, 1.5, 1.75, 2]) {
+  for (const scale of [0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]) {
     const size = app.run(`displaySize(${scale})`);
     assert.ok(size.width >= 320);
     assert.equal(size.height, 208 * scale + 132);
