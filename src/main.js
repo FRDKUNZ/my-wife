@@ -24,6 +24,7 @@ const { readPack, installPack } = require("./character-import");
 const { pathToFileURL } = require("node:url");
 const voiceLineLibrary = require("./voice-line-library");
 const { buildModeAnimationRegistry } = require("./mode-animation-registry");
+const proactive = require("./proactive-engine");
 const { execFile, spawn } = require("node:child_process");
 const { promisify } = require("node:util");
 const execFileAsync = promisify(execFile);
@@ -148,6 +149,7 @@ let foregroundActivity = null;
 let foregroundInputIdleMs = null;
 let foregroundInputReportAt = 0;
 let characterSessions = {};
+let proactiveState = proactive.blankState();
 let voiceError = false;
 let voiceFailureReason = "";
 let speechGeneration = 0;
@@ -236,6 +238,7 @@ function sessionSnapshot() {
     persona: { ...settings.persona }, affection: { ...settings.affection },
     memory: normalizeMemorySettings(settings.memory),
     profile: { ...profile }, rememberHistory: settings.rememberHistory === true,
+    proactive: proactive.normalizeState(proactiveState),
     history: publicChatHistory(),
   };
 }
@@ -281,6 +284,7 @@ function loadCharacterSession(value = {}) {
   settings.memory = normalizeMemorySettings(value.memory);
   settings.rememberHistory = value.rememberHistory === true;
   profile = normalizeProfile({ ...DEFAULT_PROFILE, ...value.profile, lastChatAt: 0 });
+  proactiveState = proactive.normalizeState(value.proactive);
   chatHistory = Array.isArray(value.history) ? value.history.slice(-80).filter((item) =>
     ["user", "assistant"].includes(item?.role) && typeof item.content === "string")
     .map((item) => ({ role: item.role, content: item.content.slice(0, 100000),
@@ -1033,7 +1037,7 @@ function maybeShowInitialPersonaSettings() {
 }
 
 function updateSettings(patch) {
-  const previous = { settings, profile, history: chatHistory, sessions: { ...characterSessions } };
+  const previous = { settings, profile, history: chatHistory, sessions: { ...characterSessions }, proactive: proactiveState };
   const targetId = getCharacterPack(patch?.characterId || settings.characterId)?.id;
   if (targetId && targetId !== settings.characterId) {
     cancelPendingChat();
@@ -1075,6 +1079,7 @@ function updateSettings(patch) {
     profile = previous.profile;
     chatHistory = previous.history;
     characterSessions = previous.sessions;
+    proactiveState = previous.proactive;
     broadcastChatState();
     throw error;
   }
@@ -2004,6 +2009,26 @@ async function sendChatMessage(_event, rawText, context) {
       return { ok: false, cancelled: true, revision: request.revision };
     }
     addChatMessage("user", text, !result.ok);
+    if (result.ok) {
+      const priorAction = proactiveState.actions.at(-1);
+      if (priorAction && !priorAction.respondedAt && Date.now() - priorAction.at < 30 * 60_000) {
+        const outcome = /\b(nanti|lain kali|tunda)\b/i.test(text) ? "deferred"
+          : /\b(jangan|berhenti|gak usah|nggak usah|tidak usah)\b/i.test(text) ? "dismissed" : "engaged";
+        const topic = proactiveState.intentions.find((item) => item.id === priorAction.sourceRef)?.topic
+          || proactiveState.curiosities.find((item) => item.id === priorAction.sourceRef)?.topic || "";
+        proactiveState = proactive.recordFeedback(proactiveState, priorAction.category, outcome, topic ? { topic } : null);
+        priorAction.respondedAt = Date.now();
+      }
+      const analyzed = proactive.analyzeUserMessage(text, proactiveState, { now: Date.now(), sourceRef: `chat:${chatRevision}` });
+      proactiveState = analyzed.state;
+      for (const item of proactiveState.curiosities) {
+        if (item.status === "asked" && proactive.isRelevant(text, item.topic) && text.length > 12) item.status = "answered";
+      }
+      if (proactiveState.intentions.some((item) => ["completed", "cancelled"].includes(item.status))) {
+        // A resolved intention should never be surfaced again.
+      }
+      try { writeCharacterSessions(); } catch { console.warn("[proactive] unable to persist local analysis"); }
+    }
     const assistantMessage = addChatMessage("assistant", result.reply, !result.ok);
     const action = result.ok ? dialogueAnimationAction(result.reply, result.action) : result.action;
     sendPetMessage(result.reply, action, {
@@ -2330,6 +2355,18 @@ async function runAutonomousConversation({ manualTest = false } = {}) {
   autonomousRequestController = new AbortController();
   broadcastChatState();
   const recent = autonomousRecentOpeners.slice(-8).map((item) => `- ${item}`).join("\n") || "- belum ada";
+  const latestUserText = [...chatHistory].reverse().find((message) => message.role === "user" && !message.failed)?.content || "";
+  const priorAction = proactiveState.actions.at(-1);
+  if (priorAction && !priorAction.respondedAt && Date.now() - priorAction.at >= 15 * 60_000) {
+    proactiveState = proactive.recordFeedback(proactiveState, priorAction.category, "ignored", null, Date.now());
+    priorAction.respondedAt = Date.now();
+    try { writeCharacterSessions(); } catch { console.warn("[proactive] unable to persist feedback"); }
+  }
+  const proactiveCandidate = proactive.eligibleCandidate(proactiveState, {
+    available: true, busy: false, audioPlaying: Boolean(speechSession || voiceLinePlaying),
+    muted: settings.tts?.enabled === false && settings.interactionResponses === false,
+    dnd: Date.now() < autonomousPauseUntil, topic: latestUserText,
+  });
   const activityAgeMs = foregroundActivity ? Date.now() - foregroundActivity.changedAt : 0;
   const stableActivity = settings.autonomousConversation?.useActivityContext !== false
     && foregroundActivity && activityAgeMs >= 25_000 ? foregroundActivity : null;
@@ -2363,7 +2400,12 @@ async function runAutonomousConversation({ manualTest = false } = {}) {
       ? "MODE CEGIL: tunjukkan sayang dan manja secara ekspresif dalam ucapan singkat yang terasa spontan. Jangan mengulang perhatian/topik yang sama, termasuk soal makan, kecuali memang relevan dengan percakapan."
       : "MODE NORMAL: tetap hangat dan perhatian dengan ucapan santai, singkat, dan tidak berlebihan.",
     "Pilih idle untuk sebagian besar obrolan. Pilih memberi_semangat khusus ketika ucapan utama Rem menyemangati atau mendukung pengguna. Pilih tea saat Rem benar-benar menawarkan atau menyarankan minuman. Rem harus terdengar hangat dan perhatian; tsundere hanya sebagai bumbu sangat ringan dan sesekali untuk rasa malu yang memang cocok, bukan sebagai nada utama atau respons otomatis terhadap pujian. Gunakan ekspresi ceria/penasaran hanya jika keadaan mendukung; angry hanya jika konteks jelas menunjukkan kekesalan. Jangan pilih state yang tidak tercantum dan jangan menulis nama ekspresi sebagai kata-kata lisan.",
-    "Jangan menyapa seolah Ferdi baru datang atau baru membuka aplikasi. Utamakan tindak lanjut percakapan sebelumnya, komentar ringan tentang aplikasi yang stabil, cerita/candaan singkat, atau pengamatan kecil yang spesifik. Nama aplikasi hanya menunjukkan aplikasi foreground; jangan mengarang isi layar, aktivitas rinci, skor, ronde, kemenangan, lokasi, atau data lain yang tidak tersedia.",
+    proactiveCandidate.type === "follow_up"
+      ? `Prioritaskan satu tindak lanjut ini karena sudah waktunya dan cocok dengan topik terakhir: ${proactiveCandidate.item.content}. Tanyakan secara singkat dan jangan mengarang perkembangan.`
+      : proactiveCandidate.type === "curiosity"
+        ? `Ajukan satu pertanyaan spesifik yang tersimpan: ${proactiveCandidate.item.question}`
+        : "Jangan menyapa seolah Ferdi baru datang atau baru membuka aplikasi. Bila tidak ada tindak lanjut yang relevan, gunakan komentar ringan, humor, atau semangat yang kontekstual; jangan mengarang aktivitas pengguna.",
+    "Nama aplikasi hanya menunjukkan aplikasi foreground; jangan mengarang isi layar, aktivitas rinci, skor, ronde, kemenangan, lokasi, atau data lain yang tidak tersedia.",
     "Jangan mengulang pembuka, topik, atau kalimat berikut:",
     recent,
     "Buat tepat satu kalimat pendek yang enak diucapkan (maksimal sekitar 120 karakter). Output hanya [expression:state] lalu kalimat Rem. Jangan tulis label lain, JSON, arahan suara, atau penjelasan.",
@@ -2391,6 +2433,8 @@ async function runAutonomousConversation({ manualTest = false } = {}) {
       return manualTest ? { ok: false, reason: "busy" } : undefined;
     }
     deliverAutonomousText(spokenText, action);
+    proactiveState = proactive.recordAction(proactiveState, proactiveCandidate, Date.now());
+    try { writeCharacterSessions(); } catch { console.warn("[proactive] unable to persist action"); }
     return { ok: true, voiceEnabled: settings.tts.enabled && settings.tts.provider !== "none" };
   } catch (error) {
     autonomousBusy = false;
