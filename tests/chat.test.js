@@ -18,6 +18,18 @@ test("full chat sends a message and becomes ready for the next one", async () =>
   assert.equal(ui.run("history.at(-1).content"), "Hello");
 });
 
+test("suggested responses are clickable and submit through the regular chat sender", async () => {
+  const sent = [];
+  const ui = loadRenderer("chat.js", {
+    sendChatMessage: async (message) => { sent.push(message); return { ok: true, history: [] }; },
+  });
+  ui.run(`applyChatState({history:[{role:"assistant",content:"Apa maksudmu?",suggestedReplies:["Aku serius","Aku ingin bicara","Aku bercanda"]}],busy:false,revision:0})`);
+  const row = ui.nodes.get("#messages").children[0];
+  assert.equal(row.children[1].children.length, 3);
+  await row.children[1].children[1].events.click();
+  assert.deepEqual(sent, ["Aku ingin bicara"]);
+});
+
 test("full chat recovers from a rejected request", async () => {
   const ui = loadRenderer("chat.js", { sendChatMessage: async () => { throw new Error("offline"); } });
   await ui.run('sendMessage("hello")');

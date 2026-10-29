@@ -88,6 +88,11 @@ let activeAudio = null;
 let speechActive = false;
 let fishAudioPlaying = false;
 let manualCegilUntil = 0;
+let modeAnimationCondition = "idle";
+let modeAnimationErrorActive = false;
+let modeAnimationConditionTimer;
+let selectedModeAnimation = null;
+let previousModeAnimationByCategory = {};
 let speechWatchdog;
 let conversationActive = false;
 let voiceLineAudio = null;
@@ -106,6 +111,7 @@ let clickReactionSequenceAt = 0;
 let clickReactionSequenceCount = 0;
 let pendingDoubleClickSequenceCount = 0;
 let clickReactionBubbleVisible = false;
+let breakupModeActive = false;
 
 function text(key, variables = {}) {
   return i18n.t(key, variables, activeLanguage);
@@ -119,11 +125,50 @@ function isAnimationMode() {
   return settings.animationMode === "animation";
 }
 
+function setModeAnimationCondition(condition, { error = false, resetAfter = 0 } = {}) {
+  if (!isAnimationMode() || !["idle", "crying"].includes(condition)) return;
+  window.clearTimeout(modeAnimationConditionTimer);
+  modeAnimationErrorActive = condition === "crying" && error;
+  modeAnimationCondition = condition;
+  selectedModeAnimation = null;
+  startAnimation();
+  if (condition === "crying" && resetAfter > 0) {
+    modeAnimationConditionTimer = window.setTimeout(() => {
+      if (!modeAnimationErrorActive) return;
+      modeAnimationErrorActive = false;
+      setModeAnimationCondition("idle");
+    }, resetAfter);
+  }
+}
+
 function activeAnimationAsset() {
-  const assets = character.animationAssets || {};
-  if (settings.cegilLocked || performance.now() < manualCegilUntil) return assets.cegil || assets.idle;
-  if (fishAudioPlaying) return assets.speak || assets.idle;
-  return assets.idle;
+  const entries = character.modeAnimationRegistry || [];
+  if ((settings.cegilLocked || performance.now() < manualCegilUntil) && character.animationAssets?.cegil) {
+    if (selectedModeAnimation?.id !== "legacy-cegil") selectedModeAnimation = { ...character.animationAssets.cegil, id: "legacy-cegil", category: "cegil" };
+    return selectedModeAnimation;
+  }
+  const category = fishAudioPlaying ? "speak" : (modeAnimationCondition === "crying" ? "crying" : "idle");
+  let candidates = entries.filter((entry) => entry.category === category).sort((a, b) => a.priority - b.priority);
+  if (!candidates.length && category !== "idle") candidates = entries.filter((entry) => entry.category === "idle").sort((a, b) => a.priority - b.priority);
+  if (!candidates.length) candidates = entries.filter((entry) => entry.category !== "crying").sort((a, b) => a.priority - b.priority);
+  // Keep older test fixtures and imported Rem packs working through the same controller.
+  if (!candidates.length) {
+    const legacy = character.animationAssets || {};
+    const key = category === "speak" ? "speak" : "idle";
+    const asset = legacy[key] || legacy.idle;
+    if (!asset) return null;
+    if (selectedModeAnimation?.id !== `legacy-${key}` || selectedModeAnimation.category !== category) {
+      selectedModeAnimation = { ...asset, id: `legacy-${key}`, category };
+    }
+    return selectedModeAnimation;
+  }
+  if (!selectedModeAnimation || selectedModeAnimation.category !== category || !candidates.some((entry) => entry.id === selectedModeAnimation.id)) {
+    const previous = previousModeAnimationByCategory[category];
+    const eligible = candidates.length > 1 ? candidates.filter((entry) => entry.id !== previous) : candidates;
+    selectedModeAnimation = eligible[Math.floor(Math.random() * eligible.length)];
+    previousModeAnimationByCategory[category] = selectedModeAnimation.id;
+  }
+  return selectedModeAnimation;
 }
 
 function clearStreamedFrameCache() {
@@ -150,7 +195,8 @@ function draw() {
     if (!current?.framePaths?.length) { ctx.clearRect(0, 0, canvas.width, canvas.height); console.error("[animation] Mode Animasi asset unavailable", current); return; }
     const framePath = current.framePaths[frameIndex % current.frames];
     const entry = streamedFrameCache.get(framePath);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // Keep the last decoded frame visible while the next PNG is loading.
+    // Clearing here made decode latency appear as a transparent blink.
     if (!entry?.loaded) { requestStreamedFrame(framePath); preloadStreamedFrames(current, frameIndex); return; }
     const image = entry.image;
     streamedFrameCache.delete(framePath); streamedFrameCache.set(framePath, entry);
@@ -283,9 +329,43 @@ function startAnimation() {
       if (!current?.framePaths?.length) { ctx.clearRect(0, 0, canvas.width, canvas.height); animationRaf = requestAnimationFrame(tick); return; }
       if (tick.asset !== current) { tick.asset = current; tick.last = now; frameIndex = 0; draw(); }
       if (now - tick.last >= current.interval) {
-        const steps = Math.max(1, Math.floor((now - tick.last) / current.interval));
-        frameIndex = (frameIndex + steps) % current.frames;
-        tick.last += steps * current.interval;
+        const currentPath = current.framePaths[frameIndex % current.frames];
+        const displayedEntry = streamedFrameCache.get(currentPath);
+        if (!displayedEntry?.loaded && !failedStreamedFrames.has(currentPath)) {
+          requestStreamedFrame(currentPath);
+          preloadStreamedFrames(current, frameIndex);
+          tick.last = now;
+          animationRaf = requestAnimationFrame(tick);
+          return;
+        }
+        let nextFrame = (frameIndex + 1) % current.frames;
+        if (nextFrame === 0 && current.loop !== false && (character.modeAnimationRegistry || []).some((entry) => entry.category === current.category)) {
+          selectedModeAnimation = null;
+          const nextAsset = activeAnimationAsset();
+          const firstPath = nextAsset?.framePaths?.[0];
+          const firstEntry = firstPath && streamedFrameCache.get(firstPath);
+          if (!firstEntry?.loaded && !failedStreamedFrames.has(firstPath)) {
+            if (tick.asset !== nextAsset) { tick.asset = nextAsset; frameIndex = 0; }
+            requestStreamedFrame(firstPath);
+            preloadStreamedFrames(nextAsset, 0);
+            tick.last = now;
+            animationRaf = requestAnimationFrame(tick);
+            return;
+          }
+          tick.asset = nextAsset;
+          nextFrame = 0;
+        }
+        const nextPath = tick.asset.framePaths[nextFrame];
+        const nextEntry = streamedFrameCache.get(nextPath);
+        if (!nextEntry?.loaded && !failedStreamedFrames.has(nextPath)) {
+          requestStreamedFrame(nextPath);
+          preloadStreamedFrames(tick.asset, nextFrame);
+          tick.last = now;
+          animationRaf = requestAnimationFrame(tick);
+          return;
+        }
+        frameIndex = nextFrame;
+        tick.last = now;
         draw();
       }
       animationRaf = requestAnimationFrame(tick);
@@ -442,6 +522,7 @@ function normalizeCharacter(nextCharacter) {
   merged.states = nextCharacter?.states || FALLBACK_CHARACTER.states;
   merged.cegilIdle = nextCharacter?.cegilIdle || null;
   merged.animationAssets = nextCharacter?.animationAssets || {};
+  merged.modeAnimationRegistry = nextCharacter?.modeAnimationRegistry || [];
   merged.automaticActions = Array.isArray(nextCharacter?.automaticActions)
     ? nextCharacter.automaticActions
     : FALLBACK_CHARACTER.automaticActions;
@@ -519,6 +600,8 @@ function applyAppState(nextAppState = {}) {
     interactionVariants = { head: 0, greet: 0, drop: 0 };
     clearPresentation();
     temporaryAnimationActive = false;
+    selectedModeAnimation = null;
+    previousModeAnimationByCategory = {};
   }
   else if (previousTts !== JSON.stringify(settings.tts)) {
     stopSpeech();
@@ -606,6 +689,10 @@ function applyAnimationModeChange(previousMode, nextMode) {
   temporaryToken += 1;
   temporaryAnimationActive = false;
   manualCegilUntil = 0;
+  window.clearTimeout(modeAnimationConditionTimer);
+  modeAnimationErrorActive = false;
+  modeAnimationCondition = "idle";
+  selectedModeAnimation = null;
   clearStreamedFrameCache();
   frameIndex = 0;
   state = "idle";
@@ -847,6 +934,7 @@ function handleClickOnlyPointerClick(sequenceCount = null) {
 }
 
 function beginDrag(event) {
+  if (breakupModeActive) return;
   voiceLineLastInteraction = Date.now();
   if (event.button !== 0) return;
   window.clearTimeout(clickTimer);
@@ -944,6 +1032,7 @@ function dismissBubble() {
   bubbleVisible = false;
   conversationActive = false;
   conversationAction = "idle";
+  if (modeAnimationErrorActive) setModeAnimationCondition("idle");
   temporaryToken += 1;
   temporaryAnimationActive = false;
   if (settings.expressionMode === "automatic" && !dragStart) {
@@ -998,6 +1087,7 @@ talkButton.addEventListener("click", () => { voiceLineLastInteraction = Date.now
 function finishSpeech(token, failed = false, reason = "") {
   if (token !== speechToken) return;
   stopSpeech(failed ? "error" : "idle", reason);
+  if (failed) setModeAnimationCondition("crying", { error: true, resetAfter: bubbleVisible ? 0 : 3500 });
   if (bubbleVisible) hideBubbleLater(Math.max(3000, bubbleRemaining));
 }
 
@@ -1207,8 +1297,13 @@ window.desktopPet.onAnimationCegil?.((enabled) => {
   manualCegilUntil = enabled ? performance.now() + 10000 : 0;
   startAnimation();
 });
+window.desktopPet.onAnimationCondition?.((condition) => {
+  if (!isAnimationMode() || !["idle", "crying"].includes(condition)) return;
+  setModeAnimationCondition(condition);
+});
 
 function handlePetMessage(message = {}) {
+  if (breakupModeActive) return;
   if (message.clear) {
     clearPresentation();
     return;
@@ -1238,6 +1333,8 @@ function handlePetMessage(message = {}) {
   }
   stopSpeech();
   showBubble(bubbleText, message.duration);
+  if (message.failed === true) setModeAnimationCondition("crying", { error: true });
+  else if (modeAnimationErrorActive) setModeAnimationCondition("idle");
   if (typeof message !== "object" || message.speak !== false) {
     speakText(text);
   }
@@ -1299,7 +1396,7 @@ function requestStreamedFrame(framePath) {
     if (generation === streamedFrameGeneration && (isCegilAnimationMode() || isAnimationMode()) && streamedFrameCache.get(framePath) === entry) {
       streamedFrameCache.delete(framePath);
       failedStreamedFrames.add(framePath);
-      console.error("Unable to load Rem idle frame", framePath, error);
+      console.error("Unable to load animation frame", framePath, error);
     }
   }, { once: true });
   image.src = framePath;
@@ -1360,6 +1457,18 @@ document.addEventListener?.("visibilitychange", () => {
 });
 
 window.desktopPet.onAppStateUpdated(applyAppState);
+window.desktopPet.onBreakupModeChanged?.((active) => {
+  breakupModeActive = active;
+  if (active) {
+    cancelDrag();
+    stopSpeech();
+    stopVoiceLine();
+    clearPresentation();
+  } else {
+    startAnimation();
+    scheduleIdleVoiceLine(5000);
+  }
+});
 window.desktopPet.onPetMessage(handlePetMessage);
 window.desktopPet.onChatStateUpdated?.((chatState) => {
   chatRequestActive = chatState.busy === true;

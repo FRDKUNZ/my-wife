@@ -40,6 +40,7 @@ test("autonomous conversation adds an assistant message and schedules a fresh ra
   assert.equal(app.run("sentPetMessages[0][2].speak"), true);
   assert.equal(app.run("sentPetMessages[0][1]"), "waving");
   assert.match(app.run("autonomousPrompt"), /tanpa label atau awalan seperti SPEAK/);
+  assert.match(app.run("autonomousPrompt"), /tepat satu kalimat pendek/);
   assert.doesNotMatch(app.run("sentPetMessages[0][0]"), /^SPEAK\s*:/i);
   assert.equal(app.run("scheduledDelays.at(-1) >= 120000 && scheduledDelays.at(-1) <= 240000"), true);
 
@@ -55,6 +56,17 @@ test("autonomous conversation adds an assistant message and schedules a fresh ra
   app.run("readSettings(); readCharacterSessions()");
   assert.equal(app.run("chatHistory.length"), 2);
   assert.equal(app.run("chatHistory.every((message) => message.role === 'assistant')"), true);
+});
+
+test("autonomous replies strip expression markers before display and speech", async () => {
+  const app = readyMain();
+  app.run('settings.characterId = "rem"');
+  app.run('settings.personaMode = "cegil"');
+  app.run(`requestAssistantReply = async () => ({ ok: true, reply: "[expression:tea] Mau Rem ambilkan teh hangat?" });`);
+  await app.run("runAutonomousConversation()");
+  assert.equal(app.run("chatHistory[0].content"), "Mau Rem ambilkan teh hangat?");
+  assert.equal(app.run("sentPetMessages[0][0]"), "Mau Rem ambilkan teh hangat?");
+  assert.equal(app.run("sentPetMessages[0][1]"), "tea");
 });
 
 test("Rem registers the individual encouragement and tea frames and matches them to spoken intent", () => {

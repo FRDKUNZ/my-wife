@@ -125,18 +125,30 @@ function renderHistory() {
       bubble.className = "bubble";
       const meta = document.createElement("div");
       meta.className = "meta";
-      row.append(bubble, meta);
+      const suggestions = document.createElement("div");
+      suggestions.className = "suggested-replies";
+      row.append(bubble, suggestions, meta);
       messagesEl.append(row);
-      rendered = { row, bubble, meta };
+      rendered = { row, bubble, suggestions, meta };
       renderedRows.push(rendered);
     }
-    const { row, bubble, meta } = rendered;
+    const { row, bubble, suggestions, meta } = rendered;
     row.className = `message ${item.role === "user" ? "user" : "assistant"}`;
     row.classList.toggle("failed", item.failed === true);
     // Keep unchanged bubbles intact while tokens arrive, including text selections.
     if (bubble.textContent !== item.content) bubble.textContent = item.content;
     const label = `${item.role === "user" ? text("chat.you") : characterName} ${timeText(item.createdAt)}`;
     if (meta.textContent !== label) meta.textContent = label;
+    const hasLaterUser = visibleHistory.slice(index + 1).some((message) => message.role === "user");
+    const choices = !hasLaterUser && Array.isArray(item.suggestedReplies) ? item.suggestedReplies : [];
+    suggestions.replaceChildren(...choices.map((choice) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = choice;
+      button.disabled = sending || remoteBusy;
+      button.addEventListener("click", () => sendMessage(choice));
+      return button;
+    }));
   }
   while (renderedRows.length > visibleHistory.length) renderedRows.pop().row.remove();
   messagesEl.scrollTop = nearBottom ? messagesEl.scrollHeight : previousScroll;

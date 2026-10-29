@@ -9,6 +9,7 @@ const {
   safeStorage,
   dialog,
   shell,
+  globalShortcut,
 } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -24,6 +25,7 @@ const { readPack, installPack } = require("./character-import");
 const { pathToFileURL } = require("node:url");
 const voiceLineLibrary = require("./voice-line-library");
 const { buildModeAnimationRegistry } = require("./mode-animation-registry");
+const { isRelationshipBreakup, naturalFrameOrder, BREAKUP_EXIT_TRANSITION } = require("./breakup-special");
 const proactive = require("./proactive-engine");
 const { execFile, spawn } = require("node:child_process");
 const { promisify } = require("node:util");
@@ -117,6 +119,23 @@ const DEFAULT_PROFILE = {
 };
 
 let mainWindow;
+let breakupWindow = null;
+let breakupActive = false;
+let breakupPhase = "idle";
+let breakupFailsafe = null;
+let breakupCloseFailsafe = null;
+let breakupFrames = [];
+let breakupStartedAt = 0;
+let breakupSession = null;
+let breakupLastTrigger = { text: "", at: 0 };
+const BREAKUP_CHOICES = [
+  "Aku serius ingin mengakhiri hubungan ini.",
+  "Aku sedang marah; aku ingin membicarakannya.",
+  "Aku cuma bercanda.",
+];
+const BREAKUP_FPS = 12;
+const BREAKUP_MAX_DURATION_MS = Math.min(120000, Math.max(30000,
+  Number(typeof process !== "undefined" ? process.env?.DESKTOP_PET_BREAKUP_MAX_DURATION_MS : 0) || 40000));
 let chatWindow;
 let quickChatWindow;
 let companionSettingsWindow;
@@ -874,6 +893,12 @@ function applyWindowSize(keepCenter = true) {
   }, true);
 }
 
+function applyAlwaysOnTop(window, enabled = settings.alwaysOnTop) {
+  if (!window || window.isDestroyed()) return;
+  window.setAlwaysOnTop(enabled, enabled ? "screen-saver" : undefined);
+  window.setVisibleOnAllWorkspaces(enabled, { visibleOnFullScreen: enabled });
+}
+
 function createWindow() {
   readSettings();
   readProfile();
@@ -902,7 +927,7 @@ function createWindow() {
     },
   });
 
-  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  applyAlwaysOnTop(mainWindow);
   mainWindow.loadFile(path.join(__dirname, "index.html"));
   mainWindow.once("ready-to-show", () => mainWindow.showInactive());
   mainWindow.on("move", positionQuickChatWindow);
@@ -929,6 +954,7 @@ function positionQuickChatWindow() {
 }
 
 function createChatWindow() {
+  if (breakupActive) return;
   if (chatWindow && !chatWindow.isDestroyed()) {
     chatWindow.show();
     chatWindow.focus();
@@ -955,6 +981,8 @@ function createChatWindow() {
     },
   });
 
+  applyAlwaysOnTop(chatWindow);
+
   chatWindow.loadFile(path.join(__dirname, "chat.html"));
   enableInputMenu(chatWindow);
   chatWindow.once("ready-to-show", () => chatWindow.show());
@@ -964,6 +992,7 @@ function createChatWindow() {
 }
 
 function createQuickChatWindow() {
+  if (breakupActive) return;
   if (quickChatWindow && !quickChatWindow.isDestroyed()) {
     positionQuickChatWindow();
     quickChatWindow.show();
@@ -988,6 +1017,8 @@ function createQuickChatWindow() {
       sandbox: false,
     },
   });
+
+  applyAlwaysOnTop(quickChatWindow);
 
   quickChatWindow.loadFile(path.join(__dirname, "quick-chat.html"));
   enableInputMenu(quickChatWindow);
@@ -1019,6 +1050,8 @@ function createCompanionSettingsWindow() {
       sandbox: false,
     },
   });
+
+  applyAlwaysOnTop(companionSettingsWindow);
 
   companionSettingsWindow.loadFile(path.join(__dirname, "settings.html"));
   enableInputMenu(companionSettingsWindow);
@@ -1088,22 +1121,23 @@ function updateSettings(patch) {
   scheduleAutonomousConversation();
   syncForegroundDetection();
   if (mainWindow) {
-    mainWindow.setAlwaysOnTop(settings.alwaysOnTop);
+    applyAlwaysOnTop(mainWindow);
     applyWindowSize();
     mainWindow.webContents.send("app-state-updated", appState());
     mainWindow.webContents.send("chat-state-updated", chatState());
   }
   if (chatWindow && !chatWindow.isDestroyed()) {
-    chatWindow.setAlwaysOnTop(settings.alwaysOnTop);
+    applyAlwaysOnTop(chatWindow);
     chatWindow.setTitle(t("window.chatTitle"));
     chatWindow.webContents.send("chat-state-updated", chatState());
   }
   if (quickChatWindow && !quickChatWindow.isDestroyed()) {
-    quickChatWindow.setAlwaysOnTop(settings.alwaysOnTop);
+    applyAlwaysOnTop(quickChatWindow);
     quickChatWindow.setTitle(t("window.quickChatTitle"));
     quickChatWindow.webContents.send("chat-state-updated", chatState());
   }
   if (companionSettingsWindow && !companionSettingsWindow.isDestroyed()) {
+    applyAlwaysOnTop(companionSettingsWindow);
     companionSettingsWindow.setTitle(t("window.settingsTitle"));
     companionSettingsWindow.webContents.send("chat-state-updated", chatState());
   }
@@ -1192,8 +1226,142 @@ function recordChatTimeProgress(now = Date.now()) {
 }
 
 function sendPetMessage(text, action = "waving", options = {}) {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (breakupActive || !mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send("pet-message", { text, action, ...options });
+}
+
+function setBreakupMode(active) {
+  breakupActive = active;
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("breakup-mode-changed", active);
+}
+
+function restoreAfterBreakupClose(reason) {
+  if (breakupPhase !== "closing") return;
+  clearTimeout(breakupFailsafe);
+  clearTimeout(breakupCloseFailsafe);
+  breakupFailsafe = null;
+  breakupCloseFailsafe = null;
+  breakupWindow = null;
+  breakupPhase = "idle";
+  setBreakupMode(false);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.showInactive();
+  console.info(`[breakup-special] restored (${reason}) after ${Date.now() - breakupStartedAt}ms`);
+  const session = breakupSession;
+  if (session && session.phase === "restoring" && session.triggerText && !app.isQuitting) {
+    session.phase = "awaiting_user_choice";
+    try { createChatWindow(); }
+    catch (error) {
+      console.warn("[breakup-special] follow-up chat unavailable", error.message);
+      session.phase = "completed";
+    }
+    const resolve = session.resume;
+    session.resume = null;
+    resolve?.(true);
+  } else if (session && session.phase === "restoring") {
+    session.phase = "completed";
+    const resolve = session.resume;
+    session.resume = null;
+    resolve?.(false);
+  }
+}
+
+function finishBreakupAnimation(reason = "complete") {
+  if (!breakupActive || breakupPhase === "closing" || breakupPhase === "idle") return;
+  clearTimeout(breakupFailsafe);
+  breakupFailsafe = null;
+  const window = breakupWindow;
+  breakupPhase = "closing";
+  if (breakupSession && breakupSession.phase !== "completed") breakupSession.phase = "restoring";
+  if (!window || window.isDestroyed()) {
+    restoreAfterBreakupClose(reason);
+    return;
+  }
+  window.removeAllListeners("close");
+  breakupCloseFailsafe = setTimeout(() => {
+    try { if (!window.isDestroyed()) window.destroy(); }
+    finally { restoreAfterBreakupClose(`${reason}-close-failsafe`); }
+  }, 2000);
+  try {
+    window.close();
+    if (window.isDestroyed()) restoreAfterBreakupClose(reason);
+  } catch (error) {
+    console.warn("[breakup-special] window close failed", error.message);
+    try { if (!window.isDestroyed()) window.destroy(); }
+    finally { restoreAfterBreakupClose(`${reason}-close-failure`); }
+  }
+}
+
+function startBreakupAnimation(triggerText = "") {
+  if (breakupActive || app.isQuitting) return false;
+  const directory = path.join(CHARACTERS_DIR, "i hate you");
+  let files;
+  try {
+    files = naturalFrameOrder(fs.readdirSync(directory).filter((name) => /\.png$/i.test(name)));
+  } catch (error) {
+    console.warn("[breakup-special] assets unavailable", error.message);
+    return false;
+  }
+  if (!files.length) return false;
+  const frames = files.map((name) => pathToFileURL(path.join(directory, name)).href);
+  const target = screen.getDisplayMatching(mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : screen.getPrimaryDisplay().bounds);
+  breakupStartedAt = Date.now();
+  let window;
+  try {
+    window = new BrowserWindow({
+      x: target.bounds.x, y: target.bounds.y, width: target.bounds.width, height: target.bounds.height,
+      frame: false, transparent: true, backgroundColor: "#00000000", resizable: false,
+      movable: false, minimizable: false, maximizable: false, closable: false,
+      skipTaskbar: true, alwaysOnTop: true, focusable: true, fullscreen: false,
+      webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: false },
+    });
+  } catch (error) {
+    console.warn("[breakup-special] window unavailable", error.message);
+    return false;
+  }
+  setBreakupMode(true);
+  breakupSession = {
+    triggerText: cleanUserMessage(triggerText), phase: "playing", resume: null,
+    followupStarted: false, choicePending: false,
+  };
+  breakupPhase = "loading";
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+  breakupWindow = window;
+  const duration = Math.ceil(frames.length * 1000 / BREAKUP_FPS);
+  const transitionBudget = BREAKUP_EXIT_TRANSITION.poseHoldMs + BREAKUP_EXIT_TRANSITION.fadeOutMs;
+  const minimumFailsafe = duration + transitionBudget + 1000;
+  const maximumDuration = Math.max(BREAKUP_MAX_DURATION_MS, minimumFailsafe);
+  breakupFailsafe = setTimeout(() => finishBreakupAnimation("maximum-duration"), Math.min(maximumDuration, duration + transitionBudget + 3000));
+  try {
+    window.setAlwaysOnTop(true, "screen-saver");
+    window.setBounds(target.bounds);
+    window.setIgnoreMouseEvents(true);
+    window.on("close", (event) => { if (breakupActive) event.preventDefault(); });
+    window.webContents.on("render-process-gone", () => finishBreakupAnimation("renderer-crash"));
+    window.webContents.on("did-fail-load", () => finishBreakupAnimation("load-failure"));
+    window.once("closed", () => {
+      if (breakupWindow !== window) return;
+      if (breakupPhase === "closing") restoreAfterBreakupClose("window-closed");
+      else finishBreakupAnimation("window-closed");
+    });
+    window.webContents.once("did-finish-load", () => {
+      if (breakupWindow !== window || !breakupActive) return;
+      breakupPhase = "playing";
+      window.show();
+      window.focus();
+      const audioFile = path.join(directory, "soundfx.mp3");
+      window.webContents.send("breakup-animation-start", {
+        frames, fps: BREAKUP_FPS, transition: BREAKUP_EXIT_TRANSITION,
+        ...(fs.existsSync(audioFile) ? { audio: pathToFileURL(audioFile).href } : {}),
+      });
+    });
+    const loading = window.loadFile(path.join(__dirname, "breakup-animation.html"));
+    loading?.catch?.(() => finishBreakupAnimation("load-failure"));
+  } catch (error) {
+    console.warn("[breakup-special] window setup failed", error.message);
+    finishBreakupAnimation("window-setup-failure");
+    return false;
+  }
+  return true;
 }
 
 function notify(title, body, action) {
@@ -1520,12 +1688,13 @@ function settingsFromChatConfigPatch(patch = {}) {
   });
 }
 
-function addChatMessage(role, content, failed = false) {
+function addChatMessage(role, content, failed = false, metadata = {}) {
   const message = {
     role,
     content,
     createdAt: Date.now(),
     failed,
+    ...metadata,
   };
   chatHistory.push(message);
   if (chatHistory.length > 80) {
@@ -1765,12 +1934,18 @@ function conversationContextInstruction(userText, turnContext = {}) {
       ? "Cegil mode remains active for this click reaction. Rem is reacting to Ferkun's affectionate taps: give one short, speakable Indonesian line (roughly 4–14 words) that can sound delighted, manja, bashfully excited, playfully dramatic, or warmly attached. Vary it naturally; do not count taps, force a pet name, or repeat a stock flirt. Return spoken words only plus a valid available expression action; no action narration."
       : "Rem is reacting to repeated affectionate taps. Give one short, speakable Indonesian line (roughly 4–14 words), soft and attentive with varied everyday phrasing. It can be a sweet comment, tiny joke, shy/tsundere reaction, or playful mock-pout when the repeated taps make that fit. Do not narrate or count the taps, do not always say Ferdi or ask a question, and do not force anger. Avoid repeating a stock line; use recent chat, activity, or memory only when genuinely relevant. Return only a natural spoken line plus a valid available expression action.")
     : "";
-  return [activityContext, activityStyle, memoryContext, explicitMemoryContext, clickStyle].filter(Boolean).join("\n");
+  const breakupFollowup = turnContext.breakupFollowup
+    ? "The user has just completed a dramatic fictional relationship-breakup animation. Their exact triggering message is the current user message below. Respond in concise, natural Indonesian as Rem, respecting the configured form of address and personality. Ask one gentle, direct question about whether they mean to end the fictional relationship or want to talk about what prompted the words. Do not assume joking, anger, or seriousness; do not guilt, pressure, or threaten them. Return only the speakable question and a valid expression action."
+    : "";
+  const breakupChoice = turnContext.breakupChoice
+    ? `The user is responding to Rem's relationship clarification. Their selected response type is ${turnContext.breakupChoice}. Reply in concise Indonesian, in character, directly to their words. For serious: calmly respect the choice without pressure, guilt, threats, or repeatedly asking them to reconsider. For upset: ask what happened and listen without assuming a cause. For joking: give one brief playful, slightly dramatic response; do not launch the fullscreen animation again. For custom: respond naturally to the user's actual message. Return a speakable reply and a valid expression action.`
+    : "";
+  return [activityContext, activityStyle, memoryContext, explicitMemoryContext, clickStyle, breakupFollowup, breakupChoice].filter(Boolean).join("\n");
 }
 
 function llmMessagesFor(userText, turnContext = {}) {
   const maxHistory = settings.assistant.maxHistory || DEFAULT_SETTINGS.assistant.maxHistory;
-  const history = chatHistory
+  const history = (turnContext.breakupFollowup ? [] : chatHistory)
     .filter((message) => !message.failed)
     .slice(-maxHistory)
     .map((message) => ({
@@ -1982,7 +2157,41 @@ async function sendChatMessage(_event, rawText, context) {
   if (!text) {
     return { ok: false, error: "empty_message", ...chatState() };
   }
+  if (breakupActive) return { ok: false, error: "special_mode", ...chatState() };
   if (chatRequest) return { ok: false, error: "chat_busy", ...chatState() };
+
+  let breakupFollowup = false;
+  let breakupChoice = "";
+  if (isRelationshipBreakup(text, { source: "user" })) {
+    const now = Date.now();
+    const duplicate = breakupLastTrigger.text === text && now - breakupLastTrigger.at < 5000;
+    if (duplicate) return { ok: false, cancelled: true, error: "duplicate_breakup_event", ...chatState() };
+    if (breakupSession && ["awaiting_user_choice", "conversation_active"].includes(breakupSession.phase)) {
+      breakupChoice = "custom";
+      breakupSession.phase = "conversation_active";
+    } else if (startBreakupAnimation(text)) {
+      breakupLastTrigger = { text, at: now };
+      const session = breakupSession;
+      const restored = await new Promise((resolve) => {
+        session.resume = resolve;
+        if (session.phase === "awaiting_user_choice") {
+          session.resume = null;
+          resolve(true);
+        }
+      });
+      if (!restored || breakupSession !== session || session.followupStarted) {
+        return { ok: false, cancelled: true, ...chatState() };
+      }
+      session.followupStarted = true;
+      breakupFollowup = true;
+    }
+  } else if (breakupSession?.phase === "awaiting_user_choice") {
+    breakupChoice = text === BREAKUP_CHOICES[0] ? "serious"
+      : text === BREAKUP_CHOICES[1] ? "upset"
+        : text === BREAKUP_CHOICES[2] ? "joking" : "custom";
+    breakupSession.choicePending = true;
+    breakupSession.phase = "conversation_active";
+  }
 
   stopVoice();
   const request = { text, createdAt: Date.now(), revision: chatRevision, controller: new AbortController() };
@@ -2004,12 +2213,23 @@ async function sendChatMessage(_event, rawText, context) {
         sendPetMessage(bubblePreview(reply), action && action !== request.action ? action : "", { source: "chat", speak: false, streaming: true });
         if (action) request.action = action;
       }
-    }, { explicitMemoryRequested: explicitMemory.requested, explicitMemorySaved: explicitMemory.saved });
+    }, { explicitMemoryRequested: explicitMemory.requested, explicitMemorySaved: explicitMemory.saved,
+      breakupFollowup, breakupChoice });
     if (chatRequest !== request) {
       return { ok: false, cancelled: true, revision: request.revision };
     }
-    addChatMessage("user", text, !result.ok);
-    if (result.ok) {
+    let finalResult = result;
+    if (breakupFollowup && !result.ok) {
+      const userName = settings.persona?.userName?.trim() || "Ferkun";
+      finalResult = {
+        ...result,
+        ok: true,
+        action: pickAvailableAction(["review", "idle"]),
+        reply: `${userName}… Rem ingin memahami maksudmu. Kamu benar-benar ingin mengakhiri hubungan kita, atau ingin membicarakan sesuatu yang membuatmu mengatakan itu?`,
+      };
+    }
+    addChatMessage("user", text, !finalResult.ok);
+    if (finalResult.ok) {
       const priorAction = proactiveState.actions.at(-1);
       if (priorAction && !priorAction.respondedAt && Date.now() - priorAction.at < 30 * 60_000) {
         const outcome = /\b(nanti|lain kali|tunda)\b/i.test(text) ? "deferred"
@@ -2029,17 +2249,19 @@ async function sendChatMessage(_event, rawText, context) {
       }
       try { writeCharacterSessions(); } catch { console.warn("[proactive] unable to persist local analysis"); }
     }
-    const assistantMessage = addChatMessage("assistant", result.reply, !result.ok);
-    const action = result.ok ? dialogueAnimationAction(result.reply, result.action) : result.action;
-    sendPetMessage(result.reply, action, {
+    const assistantMessage = addChatMessage("assistant", finalResult.reply, !finalResult.ok,
+      breakupFollowup ? { suggestedReplies: BREAKUP_CHOICES } : {});
+    const action = finalResult.ok ? dialogueAnimationAction(finalResult.reply, finalResult.action) : finalResult.action;
+    sendPetMessage(finalResult.reply, action, {
       source: "chat",
-      speak: result.ok,
-      bubbleText: bubblePreview(result.reply),
-      failed: !result.ok,
+      speak: finalResult.ok && (!breakupFollowup || (settings.tts.enabled && settings.tts.provider !== "none")),
+      bubbleText: bubblePreview(finalResult.reply),
+      failed: !finalResult.ok,
     });
-    if (result.ok) recordChatTimeProgress();
+    if (finalResult.ok) recordChatTimeProgress();
     updateMoodFromInteraction("chat");
-    return { ok: result.ok, action, message: assistantMessage,
+    if (breakupChoice && breakupSession) breakupSession.phase = "completed";
+    return { ok: finalResult.ok, action, message: assistantMessage,
       history: publicChatHistory(), revision: chatRevision };
   } finally {
     if (chatRequest === request) {
@@ -2051,6 +2273,7 @@ async function sendChatMessage(_event, rawText, context) {
 }
 
 async function reactToCharacterClick(event, rawKind, metadata = {}) {
+  if (breakupActive) return { ok: false, reason: "special_mode" };
   if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return { ok: false, reason: "forbidden" };
   if (settings.interactionResponses === false) return { ok: false, reason: "disabled" };
   const kind = ["greet", "head", "drop"].includes(rawKind) ? rawKind : "greet";
@@ -2339,6 +2562,7 @@ function dialogueAnimationAction(spokenText, requestedAction = "idle") {
 
 async function runAutonomousConversation({ manualTest = false } = {}) {
   if (!manualTest) autonomousTimer = null;
+  if (breakupActive) return manualTest ? { ok: false, reason: "special_mode" } : undefined;
   if (!settings.autonomousConversation?.enabled || app.isQuitting) {
     return manualTest ? { ok: false, reason: "disabled" } : undefined;
   }
@@ -2682,7 +2906,7 @@ function stopVoice() {
 }
 
 function beginSpeech(event, generation) {
-  if (!mainWindow || event.sender !== mainWindow.webContents || generation !== speechGeneration
+  if (breakupActive || !mainWindow || event.sender !== mainWindow.webContents || generation !== speechGeneration
     || !settings.tts.enabled || settings.tts.provider === "none") return null;
   speechSession?.controller?.abort();
   speechSession = { id: ++speechSequence, status: "preparing", controller: null };
@@ -2960,12 +3184,13 @@ app.whenReady().then(() => {
   app.on("second-instance", () => { if (mainWindow && !mainWindow.isDestroyed()) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); } });
   app.setName(t("app.name"));
   createWindow();
+  globalShortcut.register("CommandOrControl+Alt+Shift+Escape", () => finishBreakupAnimation("emergency-shortcut"));
   syncWindowsStartup();
 
   ipcMain.handle("get-app-state", () => appState());
   ipcMain.handle("get-random-voice-line", (event, category, test = false) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
-    if (owner.isDestroyed() || (owner !== mainWindow && !(test && owner === companionSettingsWindow)) || (!test && !settings.voiceLines.enabled)) return { ok: false, error: "disabled" };
+    if (breakupActive || owner.isDestroyed() || (owner !== mainWindow && !(test && owner === companionSettingsWindow)) || (!test && !settings.voiceLines.enabled)) return { ok: false, error: "disabled" };
     return pickVoiceLine(event, category);
   });
   ipcMain.handle("list-voice-lines", async (event) => isSettingsSender(event)
@@ -3001,6 +3226,12 @@ app.whenReady().then(() => {
   ipcMain.handle("list-assistant-models", listAssistantModels);
   ipcMain.handle("test-tts-connection", testTtsConnection);
   ipcMain.handle("send-chat-message", sendChatMessage);
+  ipcMain.on("breakup-animation-finishing", (event) => {
+    if (breakupWindow && event.sender === breakupWindow.webContents && breakupPhase === "playing") breakupPhase = "finishing";
+  });
+  ipcMain.on("breakup-animation-finished", (event) => {
+    if (breakupWindow && event.sender === breakupWindow.webContents) finishBreakupAnimation("complete");
+  });
   ipcMain.handle("react-to-click", reactToCharacterClick);
   ipcMain.handle("clear-chat-history", clearChatHistory);
   ipcMain.handle("stop-chat", stopChat);
@@ -3053,10 +3284,11 @@ app.whenReady().then(() => {
   syncForegroundDetection();
   maybeShowInitialPersonaSettings();
 });
-
 app.on("window-all-closed", () => app.quit());
+app.on("will-quit", () => { globalShortcut.unregisterAll(); clearTimeout(breakupFailsafe); clearTimeout(breakupCloseFailsafe); });
 app.on("before-quit", () => {
   app.isQuitting = true;
+  if (breakupActive) finishBreakupAnimation("app-quit");
   clearTimeout(autonomousTimer);
   autonomousTimer = null;
   stopForegroundDetection();

@@ -79,10 +79,27 @@ contextBridge.exposeInMainWorld("desktopPet", {
     ipcRenderer.on("animation-cegil", listener);
     return () => ipcRenderer.off("animation-cegil", listener);
   },
+  onAnimationCondition: (callback) => {
+    const listener = (_event, condition) => callback(condition);
+    ipcRenderer.on("animation-condition", listener);
+    return () => ipcRenderer.off("animation-condition", listener);
+  },
   onPetMessage: (callback) => {
     const listener = (_event, message) => callback(message);
     ipcRenderer.on("pet-message", listener);
     return () => ipcRenderer.off("pet-message", listener);
+  },
+  onBreakupAnimation: (callback) => {
+    const listener = (_event, sequence) => callback(sequence);
+    ipcRenderer.on("breakup-animation-start", listener);
+    return () => ipcRenderer.off("breakup-animation-start", listener);
+  },
+  beginBreakupAnimationExit: () => ipcRenderer.send("breakup-animation-finishing"),
+  finishBreakupAnimation: () => ipcRenderer.send("breakup-animation-finished"),
+  onBreakupModeChanged: (callback) => {
+    const listener = (_event, active) => callback(active === true);
+    ipcRenderer.on("breakup-mode-changed", listener);
+    return () => ipcRenderer.off("breakup-mode-changed", listener);
   },
   recordInteraction: (kind) => ipcRenderer.send("record-interaction", kind),
   reportUserActivity: () => ipcRenderer.send("report-user-activity"),

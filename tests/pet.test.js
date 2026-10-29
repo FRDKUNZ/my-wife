@@ -101,6 +101,25 @@ test("Mode Animasi uses Fish playback and its PNG sequences, then restores Norma
   assert.equal(pet.intervals.size, 1);
 });
 
+test("Mode Animasi uses crying for failed chat messages and voice playback errors", () => {
+  const pet = loadPet();
+  const character = JSON.stringify({
+    id: "rem",
+    spritePath: "rem.png",
+    modeAnimationRegistry: [
+      { id: "idle", category: "idle", frames: 1, interval: 80, loop: true, framePaths: ["idle.png"] },
+      { id: "crying", category: "crying", frames: 1, interval: 80, loop: true, framePaths: ["crying.png"] },
+    ],
+  });
+  pet.run(`applyAppState({activeCharacter:${character},settings:{animationMode:"animation",expressionMode:"automatic"}})`);
+  pet.run('handlePetMessage({text:"Request failed",source:"chat",failed:true,speak:false})');
+  assert.equal(pet.run("modeAnimationCondition"), "crying");
+  pet.run("dismissBubble()");
+  assert.equal(pet.run("modeAnimationCondition"), "idle");
+  pet.run("finishSpeech(speechToken, true, 'audio_playback_failed')");
+  assert.equal(pet.run("modeAnimationCondition"), "crying");
+});
+
 test("individual PNG action frames preload and render as a contextual conversation animation", async () => {
   const pet = loadPet();
   pet.run(`applyAppState({

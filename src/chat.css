@@ -146,6 +146,16 @@ button:disabled {
   font-size: 11px;
 }
 
+.suggested-replies {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.suggested-replies:empty { display: none; }
+.suggested-replies button { padding: 6px 9px; text-align: left; font-size: 12px; }
+
 .composer {
   display: grid;
   grid-template-columns: 1fr auto;
